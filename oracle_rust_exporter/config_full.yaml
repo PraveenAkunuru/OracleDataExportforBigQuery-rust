@@ -1,0 +1,16 @@
+database:
+  username: "TESTUSER"
+  password: "testpassword"
+  host: "localhost"
+  port: 1521
+  service: "FREEPDB1"
+
+export:
+  output_dir: "/app/export_data_full"
+  schema: "TESTUSER"
+  # No table specified = ALL tables
+  parallel: 4
+  prefetch_rows: 5000
+  enable_row_hash: true
+  cpu_percent: 50
+  # field_delimiter: "\x10" # Default is already Ctrl+P

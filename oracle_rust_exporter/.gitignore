@@ -1,0 +1,10 @@
+/target
+/export_data*
+/export_test*
+/config_local.yaml
+*.zip
+*.tar.gz
+/lib
+/oracle_exporter_dist
+.DS_Store
+**/*.log

@@ -1,0 +1,13 @@
+database:
+  username: "TESTUSER"
+  password: "testpassword"
+  host: "localhost"
+  port: 1521
+  service: "FREEPDB1"
+
+export:
+  output_dir: "/app/export_data"
+  schema: "TESTUSER"
+  table: "ALL_TYPES_TEST"
+  parallel: 4
+  prefetch_rows: 5000
