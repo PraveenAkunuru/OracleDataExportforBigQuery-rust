@@ -30,10 +30,16 @@ def check_export_verification(output_dir):
     
     print(f"Total Rows:  {total_rows:,}")
     print(f"Total Bytes: {total_bytes / (1024*1024):.2f} MB")
+    
+    mb_per_sec = summary.get('total_mb_per_sec')
+    if mb_per_sec is None and duration > 0:
+        mb_per_sec = total_bytes / (1024*1024) / duration
+        
     if duration > 0:
         print(f"Duration:    {duration:.2f} s")
         print(f"Throughput:  {total_rows / duration:.2f} rows/s")
-        print(f"             {total_bytes / (1024*1024) / duration:.2f} MB/s")
+        if mb_per_sec is not None:
+             print(f"             {mb_per_sec:.2f} MB/s")
     
     details = report.get('details', [])
     failed_tables = [t for t in details if t['status'] == 'FAILURE']

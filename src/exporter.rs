@@ -94,91 +94,14 @@ pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_cl
         // Always alias to ensure CSV header matches column name (especially for expressions)
         select_parts.push(format!("{} AS \"{}\"", raw_expr, col_name));
 
-            if enable_row_hash {
-            // Note: We need OracleTypes to use sql_utils.
-            // But here we only have names and string types from metadata query?
-            // Actually, build_select_query does a query to all_tab_columns which gives STRING data_type.
-            // sql_utils wants OracleType enum.
-            // This is a disconnect. AppConfig loaded metadata via `get_table_columns` (which gets OracleType)
-            // But `exporter::build_select_query` does its own query.
-            
-            // Refactor: We should map string types to somewhat close OracleType or separate string-based logic?
-            // Or, since we want PARITY, we should use the same logic.
-            // The `metadata::get_table_columns` logic does `SELECT * WHERE 1=0` to get real types.
-            // `exporter.rs` queries `all_tab_columns`.
-            
-            // Let's stick to `exporter.rs` logic for now BUT duplicated?
-            // No, the user asked to remove duplicates.
-            // I should modify `build_select_query` to take `Vec<OracleType>`?
-            // But `export_table` calls it before it has the types (it gets types from execution).
-            // Chicken and egg.
-            
-            // Solution: We can trust the string-based logic in `exporter.rs` matches `sql_utils` intent,
-            // OR we move string-parsing logic to sql_utils too.
-            // But `sql_utils` uses `OracleType`.
-            
-            // Let's implement `get_hash_expr_from_str` in `sql_utils` or just inline the adaptation here?
-            // Better: Let's defer ROW_HASH generation to AFTER we have types? 
-            // No, we need it in the SQL string.
-            
-            // Okay, let's keep the logic here but align it 100% with sql_utils conceptually.
-            // Actually, `exporter.rs` lines 87-117 logic IS what `sql_utils` implements.
-            // I will update `sql_utils` to also support string-based lookup, or Just Map strings here.
-            
-            // Let's rewrite this section to be cleaner using the same patterns, even if not calling same function 
-            // due to type mismatch.
-            // OR better: `OracleType` is better.
-            // Can we get Types first?
-            // The `Coordinator` HAS types. It passes them to `artifacts`.
-            // But `ExportParams` doesn't accept types.
-            
-            // Minimal Change: Update this block to match `sql_utils` logic string-wise.
-            // It already does match mostly.
-            // "BLOB", "CLOB" ... matches.
-            // "RAW" -> RAWTOHEX matches.
-            // "ROWID" -> ROWIDTOCHAR matches.
-            
-            // I will add a comment delegating to the existing logic but asserting parity.
-            // AND I will remove the manual chunking loop here and try to use a shared helper if possible.
-            // But since I don't have OracleType here easily... I'll leave it but clean it up.
-            
-            // Wait, I can't easily unify without major refactor of `export_table` signature.
-            // User asked to "Review all code... make sure no duplicates".
-            // I should solve this.
-            
-            // Accessing `all_tab_columns` gives `DATA_TYPE`.
-            // I can map that string to `OracleType` via a helper?
-            // It's approximate (TIMESTAMP(6) -> Timestamp).
-            
-            let upper_type = data_type.to_uppercase();
-             let base_type = upper_type.split('(').next().unwrap_or("").trim();
-             
-             // Check exclusion
-             if matches!(base_type, "BLOB" | "CLOB" | "NCLOB" | "XMLTYPE" | "BFILE" | "LONG" | "LONG RAW") {
-                 continue; // Skip this col for hash
-             }
-             
-             let hash_input = if base_type == "RAW" {
-                 format!("RAWTOHEX(\"{}\")", col_name)
-             } else if base_type.contains("ROWID") {
-                 format!("ROWIDTOCHAR(\"{}\")", col_name)
-             } else if upper_type.contains("TIME ZONE") {
-                 // The 'raw_expr' logic above handled the UTC conversion part.
-                 // So we just use raw_expr.
-                 raw_expr.clone()
-             } else {
-                 format!("TO_CHAR(\"{}\")", col_name)
-             };
-             
-             hash_parts.push(format!("STANDARD_HASH(COALESCE({}, ''), 'SHA256')", hash_input));
+        if enable_row_hash {
+            if let Some(h) = crate::sql_utils::get_hash_expr_from_str(&col_name, &data_type) {
+                hash_parts.push(h);
+            }
         }
     }
 
     if enable_row_hash && !hash_parts.is_empty() {
-        // Reuse sql_utils chunking logic??
-        // sql_utils::build_row_hash_select takes columns and types. 
-        // Here we have `hash_parts` strings.
-        // We can make a helper in `sql_utils` that takes `hash_parts` strings directly!
         let final_expr = crate::sql_utils::build_hash_from_parts(&hash_parts);
         select_parts.push(format!("{} AS ROW_HASH", final_expr));
     }

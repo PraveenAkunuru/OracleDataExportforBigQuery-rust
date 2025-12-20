@@ -1,44 +1,53 @@
 use oracle::sql_type::OracleType;
 
-/// centralized logic for ROW_HASH expression generation.
-/// This ensures that the SQL used for validation, the manual export script (export.sql),
-/// and the actual application export query all use the EXACT same hashing logic.
-pub fn get_hash_expr(col_name: &str, oracle_type: &OracleType) -> Option<String> {
-    // Check exclusion types based on Python legacy behavior + limitations
-    let skip = matches!(oracle_type, 
-        OracleType::BLOB | 
-        OracleType::CLOB | 
-        OracleType::NCLOB | 
-        OracleType::BFILE | 
-        OracleType::Long | 
-        OracleType::Xml
-    );
+/// Internal helper to check if a type should be skipped for hashing.
+fn is_excluded_type(data_str: &str) -> bool {
+    let upper = data_str.to_uppercase();
+    // Match base type before any (scale, precision)
+    let base = upper.split('(').next().unwrap_or("").trim();
+    matches!(base, "BLOB" | "CLOB" | "NCLOB" | "BFILE" | "LONG" | "LONG RAW" | "XMLTYPE" | "XML")
+}
 
-    if skip {
+/// Centralized logic for ROW_HASH expression generation using OracleType.
+pub fn get_hash_expr(col_name: &str, oracle_type: &OracleType) -> Option<String> {
+    let type_str = format!("{:?}", oracle_type).to_uppercase();
+    if is_excluded_type(&type_str) {
         return None;
     }
 
-    // Determine the transformation wrap
     let expr = match oracle_type {
         OracleType::Raw(_) => format!("RAWTOHEX(\"{}\")", col_name),
         OracleType::Rowid => format!("ROWIDTOCHAR(\"{}\")", col_name),
         OracleType::TimestampTZ(_) | OracleType::TimestampLTZ(_) => {
-            // Normalize TimeZone to UTC string for consistent hashing across systems
             format!("TO_CHAR(SYS_EXTRACT_UTC(\"{}\"), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"')", col_name)
         },
         OracleType::Date | OracleType::Timestamp(_) => {
-             // Standard Date/Timestamp -> explicit TO_CHAR to avoid locale variance
              format!("TO_CHAR(\"{}\")", col_name)
         },
-        _ => {
-            // Default: "COL" -> TO_CHAR("COL")
-            // Note: We use TO_CHAR implicitly for consistency to stringify numbers/varchars
-            format!("TO_CHAR(\"{}\")", col_name)
-        }
+        _ => format!("TO_CHAR(\"{}\")", col_name),
     };
     
-    // Final wrap: STANDARD_HASH(COALESCE(expr, ''), 'SHA256')
-    // We treat NULL as empty string for hashing purposes (Python legacy).
+    Some(format!("STANDARD_HASH(COALESCE({}, ''), 'SHA256')", expr))
+}
+
+/// Centralized logic for ROW_HASH expression generation using string-based types.
+/// Useful for metadata queries where full OracleType enum isn't available.
+pub fn get_hash_expr_from_str(col_name: &str, data_type: &str) -> Option<String> {
+    if is_excluded_type(data_type) {
+        return None;
+    }
+
+    let upper = data_type.to_uppercase();
+    let expr = if upper.contains("RAW") && !upper.contains("LONG") {
+        format!("RAWTOHEX(\"{}\")", col_name)
+    } else if upper.contains("ROWID") {
+        format!("ROWIDTOCHAR(\"{}\")", col_name)
+    } else if upper.contains("TIME ZONE") {
+        format!("TO_CHAR(SYS_EXTRACT_UTC(\"{}\"), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"')", col_name)
+    } else {
+        format!("TO_CHAR(\"{}\")", col_name)
+    };
+
     Some(format!("STANDARD_HASH(COALESCE({}, ''), 'SHA256')", expr))
 }
 
