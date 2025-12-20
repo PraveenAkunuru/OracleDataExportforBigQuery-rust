@@ -6,12 +6,10 @@ database:
   service: "FREEPDB1"
 
 export:
-  schema: "TESTUSER"
-  output_dir: "./export_extended"
-  parallel: 1
-  enable_row_hash: true
-  tables:
-    - "EXTENDED_TYPES_TEST"
+  output_dir: "./export_extended_test"
+  table: "EXTENDED_TYPES_TEST"
+  field_delimiter: ","
+  load_to_bq: true
 
 bigquery:
   project: "pakunuru-1119-20250930202256"

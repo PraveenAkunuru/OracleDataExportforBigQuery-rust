@@ -64,6 +64,8 @@ pub struct ExportConfig {
     pub tables: Option<Vec<String>>,
     /// Path to a file containing a list of tables (optional)
     pub tables_file: Option<String>,
+    /// Automatically load data to BigQuery after export (explicit option)
+    pub load_to_bq: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -98,6 +100,17 @@ pub struct CliArgs {
     pub output: Option<String>,
     #[arg(long)]
     pub query_where: Option<String>,
+    /// Automatically load data into BigQuery (explicit option)
+    #[arg(long)]
+    pub load: bool,
+
+    /// Override parallelism (number of threads)
+    #[arg(long)]
+    pub parallel: Option<usize>,
+
+    /// Override target CPU usage percent (1-100)
+    #[arg(long)]
+    pub cpu_percent: Option<u8>,
 }
 
 impl AppConfig {
@@ -123,6 +136,9 @@ impl AppConfig {
         if let Some(s) = &args.service { self.database.service = s.clone(); }
         if let Some(t) = &args.table { self.export.table = Some(t.clone()); }
         if let Some(o) = &args.output { self.export.output_dir = o.clone(); }
+        if args.load { self.export.load_to_bq = Some(true); }
+        if let Some(p) = args.parallel { self.export.parallel = Some(p); }
+        if let Some(c) = args.cpu_percent { self.export.cpu_percent = Some(c); }
     }
 
     pub fn validate(&self) -> Result<(), Box<dyn Error>> {
@@ -179,5 +195,34 @@ export:
         assert_eq!(config.database.port, 1521);
         assert_eq!(config.export.table.as_deref(), Some("MY_TABLE"));
         assert_eq!(config.export.enable_row_hash, Some(true));
+    }
+
+    #[test]
+    fn test_merge_cli_overrides() {
+        let mut config = AppConfig {
+            database: DatabaseConfig {
+                username: "u".into(), password: None, host: "h".into(), port: 1521, service: "s".into()
+            },
+            export: ExportConfig {
+                output_dir: ".".into(), schema: None, table: None, parallel: Some(4), prefetch_rows: None,
+                exclude_tables: None, enable_row_hash: None, cpu_percent: Some(20), field_delimiter: None,
+                schemas: None, schemas_file: None, tables: None, tables_file: None, load_to_bq: None,
+            },
+            bigquery: None,
+        };
+
+        let args = CliArgs {
+            config: None, username: None, password: None, host: None, service: None, port: None,
+            table: None, output: None, query_where: None, load: true,
+            parallel: Some(10),
+            cpu_percent: Some(80),
+        };
+
+        config.merge_cli(&args);
+
+        // Verify CLI overrides Config
+        assert_eq!(config.export.parallel, Some(10));
+        assert_eq!(config.export.cpu_percent, Some(80));
+        assert_eq!(config.export.load_to_bq, Some(true));
     }
 }

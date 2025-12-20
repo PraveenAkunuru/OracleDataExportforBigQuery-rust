@@ -39,7 +39,7 @@ pub fn format_timestamp(ts: &Timestamp) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // use super::*; // Unused
 
     #[test]
     fn test_format_timestamp() {
@@ -57,11 +57,11 @@ mod tests {
     }
 }
 
-use crate::metadata;
+use crate::oracle_metadata;
 
 /// Builds the SELECT query dynamically based on table metadata
 pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_clause: Option<&String>, enable_row_hash: bool) -> Result<(String, Vec<String>)> {
-    let mut stmt = conn.statement(metadata::SQL_GET_COLUMNS).build()?;
+    let mut stmt = conn.statement(oracle_metadata::SQL_GET_COLUMNS).build()?;
     let table_param: &dyn oracle::sql_type::ToSql = &table;
     let schema_param: &dyn oracle::sql_type::ToSql = &schema;
     let rows = stmt.query(&[table_param, schema_param])?;
@@ -110,14 +110,14 @@ pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_cl
         select_parts.push(format!("{} AS \"{}\"", raw_expr, col_name));
 
         if enable_row_hash {
-            if let Some(h) = crate::sql_utils::get_hash_expr_from_str(&col_name, &data_type) {
+            if let Some(h) = crate::sql_generator_utils::get_hash_expr_from_str(&col_name, &data_type) {
                 hash_parts.push(h);
             }
         }
     }
 
     if enable_row_hash && !hash_parts.is_empty() {
-        let final_expr = crate::sql_utils::build_hash_from_parts(&hash_parts);
+        let final_expr = crate::sql_generator_utils::build_hash_from_parts(&hash_parts);
         select_parts.push(format!("{} AS ROW_HASH", final_expr));
     }
     
@@ -192,10 +192,12 @@ pub fn export_table(params: ExportParams) -> Result<ExportStats> {
     // Setup Output
     info!("Writing output to: {}", params.output_file);
     let file = File::create(&params.output_file).expect("Unable to create output file");
-    let buf_writer = BufWriter::new(file); 
+    // Increase buffer to 128KB for better throughput
+    let buf_writer = BufWriter::with_capacity(128 * 1024, file); 
     let encoder = GzEncoder::new(buf_writer, Compression::fast()); 
     
     let delimiter = params.field_delimiter.bytes().next().unwrap_or(b'\x10'); // Default Ctrl+P
+    
     let mut wtr = WriterBuilder::new()
         .delimiter(delimiter)
         .quote_style(QuoteStyle::NonNumeric)
@@ -211,6 +213,7 @@ pub fn export_table(params: ExportParams) -> Result<ExportStats> {
     let mut uncompressed_bytes: u64 = 0;
     let mut last_log = Instant::now();
 
+    info!("Step 3 [{}]: Starting record fetch from Oracle...", params.table);
     for row_result in rows {
         let row = row_result?; 
         let mut record = Vec::with_capacity(col_names.len());
@@ -264,9 +267,11 @@ pub fn export_table(params: ExportParams) -> Result<ExportStats> {
         wtr.write_record(&record).expect("Failed to write record");
         row_count += 1;
         
-        if last_log.elapsed().as_secs() >= 5 {
+        if last_log.elapsed().as_secs() >= 5 || (row_count > 0 && row_count % 100_000 == 0) {
              let mb = uncompressed_bytes as f64 / (1024.0 * 1024.0);
-             info!("Exported {} rows... (~{:.2} MB uncompressed)", row_count, mb);
+             let elapsed = start.elapsed().as_secs_f64();
+             let rate = if elapsed > 0.0 { mb / elapsed } else { 0.0 };
+             info!("Progress [{}]: Exported {} rows... (~{:.2} MB uncompressed, {:.2} MB/s)", params.table, row_count, mb, rate);
              last_log = Instant::now();
         }
     }

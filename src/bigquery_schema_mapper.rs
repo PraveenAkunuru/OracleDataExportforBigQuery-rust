@@ -63,15 +63,18 @@ pub fn map_oracle_to_bq(oracle_type: &OracleType, raw_type: Option<&str>) -> Str
         OracleType::Number(precision, scale) => {
             if *scale == 0 {
                 if *precision > 0 && *precision <= 18 {
-                    "INTEGER".to_string()
+                    "INT64".to_string()
                 } else {
-                    "NUMERIC".to_string()
+                    "BIGNUMERIC".to_string()
                 }
             } else if *scale == -127 { 
-                // FLOAT in Oracle
-                "FLOAT64".to_string()
+                if *precision == 0 {
+                    "BIGNUMERIC".to_string() // NUMBER without params
+                } else {
+                    "FLOAT64".to_string() // FLOAT(p)
+                }
             } else {
-                "NUMERIC".to_string()
+                "BIGNUMERIC".to_string()
             }
         },
         OracleType::Int64 => "INTEGER".to_string(),
@@ -107,9 +110,14 @@ pub fn map_oracle_to_bq_ddl(oracle_type: &OracleType, raw_type: Option<&str>) ->
 
     match oracle_type {
         OracleType::Number(prec, scale) => {
-             // Logic for INT64 vs NUMERIC vs BIGNUMERIC
-             if *scale == 0 {
-                 if *prec > 18 { "NUMERIC".to_string() } else { "INT64".to_string() }
+             if *scale == -127 {
+                 if *prec == 0 {
+                     "BIGNUMERIC".to_string()
+                 } else {
+                     "FLOAT64".to_string()
+                 }
+             } else if *scale == 0 {
+                 if *prec > 0 && *prec <= 18 { "INT64".to_string() } else { "BIGNUMERIC".to_string() }
              } else {
                  let p = *prec;
                  let s = *scale;
@@ -117,11 +125,7 @@ pub fn map_oracle_to_bq_ddl(oracle_type: &OracleType, raw_type: Option<&str>) ->
                  if (s > 0 && s <= 9) && (p > 0 && p <= 38) {
                       format!("NUMERIC({}, {})", p, s)
                  } else {
-                      if p > 0 && s > 0 {
-                          format!("BIGNUMERIC({}, {})", p, s)
-                      } else {
-                          "BIGNUMERIC".to_string()
-                      }
+                      format!("BIGNUMERIC({}, {})", p, s)
                  }
              }
         },

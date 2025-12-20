@@ -11,8 +11,8 @@
 //! to ensure the host system is not overwhelmed.
 
 use crate::config::AppConfig;
-use crate::metadata;
-use crate::exporter::{self, ExportParams};
+use crate::oracle_metadata;
+use crate::oracle_data_extractor::{self, ExportParams};
 use log::{info, error, warn};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -21,6 +21,8 @@ use num_cpus;
 use oracle::Connection;
 use serde::Serialize;
 use std::fs::File;
+// use std::process::Command; // Moved to bigquery_ingestion
+// use std::path::Path; // Moved to bigquery_ingestion
 
 /// Task represents a single unit of work (exporting a table or a chunk)
 #[derive(Debug, Clone)]
@@ -177,9 +179,12 @@ impl Coordinator {
         let results = Arc::new(Mutex::new(Vec::new()));
 
         // 1. Discover Work
+        info!("Step 1: Discovering tables and planning tasks...");
         self.discover_and_plan_tasks(tx, results.clone())?;
+        info!("Step 1: Planning completed.");
 
         // 2. Spawn Workers
+        info!("Step 2: Spawning {} worker threads...", max_threads);
         let mut handles = Vec::new();
         let config_clone = self.config.clone();
         
@@ -213,10 +218,17 @@ impl Coordinator {
         let duration = start_time.elapsed().as_secs_f64();
         if let Ok(final_results) = results.lock() {
             self.generate_report(&final_results, duration)?;
+            
+            // 4. Optional: Load to BigQuery
+            if self.config.export.load_to_bq.unwrap_or(false) {
+                crate::bigquery_ingestion::run_load_scripts(&self.config.export, &final_results)?;
+            }
         }
 
         Ok(())
     }
+
+    // run_load_scripts refactored to crate::bigquery_loader::run_load_scripts
     
     fn generate_report(&self, results: &[TaskResult], duration_secs: f64) -> std::io::Result<()> {
         let total = results.len();
@@ -267,12 +279,16 @@ impl Coordinator {
 
         let cpus = num_cpus::get();
         let pct = self.config.export.cpu_percent.unwrap_or(50);
-        let pct_clamped = std::cmp::min(pct, 80);
         
-        let target = (cpus as f64 * (pct_clamped as f64 / 100.0)) as usize;
-        let final_target = std::cmp::max(1, target);
+        // If user explicitly set cpu_percent, we trust them up to 100%. 
+        // Otherwise default is 50%.
+        // We cap at 32 threads to avoid diminishing returns/context switching on massive machines 
+        // unless explicitly overridden by 'parallel'.
         
-        info!("Dynamic Concurrency: {} CPUs available. Target usage {}%. Threads: {}", cpus, pct_clamped, final_target);
+        let target_usage = (cpus as f64 * (pct as f64 / 100.0)).ceil() as usize;
+        let final_target = std::cmp::max(1, target_usage);
+        
+        info!("Dynamic Concurrency: {} CPUs available. Target usage {}%. Threads: {}", cpus, pct, final_target);
         
         final_target
     }
@@ -283,6 +299,7 @@ impl Coordinator {
         let conn = Connection::connect(&db.username, db.password.as_deref().unwrap_or(""), &conn_string)?;
         
         let tasks = self.process_table_discovery(&conn, &results);
+        info!("Step 1: Discovered {} tables to process.", tasks.len());
         if tasks.is_empty() {
             warn!("No tables found to export.");
         }
@@ -310,21 +327,21 @@ impl Coordinator {
 
         let schemas = self.resolve_schemas();
         let whitelist = self.resolve_tables();
-        let mut t_list = Vec::new();
+        let mut t_list: Vec<(String, String)> = Vec::new();
         
         for s in schemas {
             info!("Discovering tables in schema: {}", s);
-            match metadata::get_tables(conn, &s) {
+            match oracle_metadata::get_tables(conn, &s) {
                 Ok(tables) => {
                     info!("Found {} tables in {}", tables.len(), s);
-                    for table in tables {
+                    for table in &tables {
                         // Filter by tables list if present
                         if let Some(set) = &whitelist {
-                            if set.iter().any(|w| w.eq_ignore_ascii_case(&table)) {
-                                t_list.push((s.clone(), table));
+                            if set.iter().any(|w| w.eq_ignore_ascii_case(table)) {
+                                t_list.push((s.clone(), table.clone()));
                             }
                         } else {
-                            t_list.push((s.clone(), table));
+                            t_list.push((s.clone(), table.clone()));
                         }
                     }
                 },
@@ -363,7 +380,7 @@ impl Coordinator {
         }
 
         // Size check
-        let size_gb = match metadata::get_table_size_gb(conn, schema, table) {
+        let size_gb = match oracle_metadata::get_table_size_gb(conn, schema, table) {
             Ok(s) => s,
             Err(e) => {
                 warn!("Failed to get table size for {}.{}: {}", schema, table, e);
@@ -386,7 +403,7 @@ impl Coordinator {
         std::fs::create_dir_all(&data_dir)?;
         std::fs::create_dir_all(&config_dir)?;
 
-        let (names, types, raw_strings) = match metadata::get_table_columns(conn, schema, table) {
+        let (names, types, raw_strings) = match oracle_metadata::get_table_columns(conn, schema, table) {
             Ok(res) => res,
             Err(e) => {
                 warn!("Failed to get columns for {}.{}: {}", schema, table, e);
@@ -404,9 +421,9 @@ impl Coordinator {
 
         // Artifacts & Validation
         let start_time = std::time::Instant::now();
-        let oracle_ddl = metadata::get_ddl(conn, schema, table);
+        let oracle_ddl = oracle_metadata::get_ddl(conn, schema, table);
         
-        let pk_cols = match metadata::get_primary_key(conn, schema, table) {
+        let pk_cols = match oracle_metadata::get_primary_key(conn, schema, table) {
             Ok(Some(pks)) => {
                 info!("Identified Primary Key for {}.{}: {:?}", schema, table, pks);
                 Some(pks)
@@ -423,7 +440,7 @@ impl Coordinator {
 
         let schema_path = format!("{}/schema.json", config_dir);
         let enable_row_hash = self.config.export.enable_row_hash.unwrap_or(false);
-        if let Err(e) = crate::bigquery::generate_schema(&names, &types, &raw_strings, &schema_path, enable_row_hash) {
+        if let Err(e) = crate::bigquery_schema_mapper::generate_schema(&names, &types, &raw_strings, &schema_path, enable_row_hash) {
             warn!("Failed to generate BigQuery schema for {}.{}: {}", schema, table, e);
         }
 
@@ -433,14 +450,14 @@ impl Coordinator {
             .map(|(n, _)| n.clone())
             .collect();
 
-        match crate::validation::validate_table(conn, schema, table, pk_cols.as_deref(), Some(&agg_cols)) {
+        match crate::data_validator::validate_table(conn, schema, table, pk_cols.as_deref(), Some(&agg_cols)) {
             Ok(stats) => {
                 let duration = start_time.elapsed().as_secs_f64();
                 let config_path = std::path::Path::new(&config_dir);
                 let project = self.config.bigquery.as_ref().map(|bq| bq.project.as_str()).unwrap_or("project");
                 let dataset = self.config.bigquery.as_ref().map(|bq| bq.dataset.as_str()).unwrap_or(schema);
 
-                if let Err(e) = crate::artifacts::save_all_artifacts(
+                if let Err(e) = crate::artifact_generator::save_all_artifacts(
                     config_path,
                     schema,
                     table,
@@ -467,7 +484,7 @@ impl Coordinator {
         if size_gb > 1.0 { // Threshold 1GB
             let chunk_count = (size_gb / 1.0).ceil() as u32;
             info!("Splitting {} into {} chunks", table, chunk_count);
-            match metadata::generate_chunks(conn, schema, table, chunk_count) {
+            match oracle_metadata::generate_chunks(conn, schema, table, chunk_count) {
                 Ok(chunks) => {
                     for chunk in chunks {
                          let filename = format!("{}/data_chunk_{:04}.csv.gz", data_dir, chunk.chunk_id);
@@ -543,7 +560,7 @@ impl Coordinator {
         let start = std::time::Instant::now();
         info!("Starting task: {}.{} (Chunk: {:?})", task.schema, task.table, task.chunk_id);
         
-        match exporter::export_table(params) {
+        match oracle_data_extractor::export_table(params) {
             Ok(stats) => {
                 info!("Finished task: {}.{} ({:?}) - {} rows, {} bytes", task.schema, task.table, task.chunk_id, stats.rows, stats.bytes);
                 TaskResult::success(
@@ -597,6 +614,7 @@ mod tests {
                 schemas_file: None,
                 tables: None,
                 tables_file: None,
+                load_to_bq: None,
             },
             bigquery: None,
         }

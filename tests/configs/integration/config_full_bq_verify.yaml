@@ -7,11 +7,9 @@ database:
 
 export:
   schema: "TESTUSER"
-  output_dir: "./export_extended"
-  parallel: 1
-  enable_row_hash: true
-  tables:
-    - "EXTENDED_TYPES_TEST"
+  output_dir: "./export_full_bq"
+  parallel: 10
+  enable_row_hash: false
 
 bigquery:
   project: "pakunuru-1119-20250930202256"

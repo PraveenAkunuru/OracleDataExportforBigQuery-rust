@@ -20,21 +20,22 @@
 //! - `bigquery`: BigQuery type mapping and schema generation.
 
 // MODULES
-mod exporter;
+mod oracle_data_extractor;
 mod config;
-mod metadata;
-mod coordinator;
-mod bigquery;
-mod validation;
-mod artifacts;
-mod sql_utils;
+mod oracle_metadata;
+mod export_coordinator;
+mod bigquery_schema_mapper;
+mod data_validator;
+mod artifact_generator;
+mod sql_generator_utils;
+pub mod bigquery_ingestion;
 
 use clap::Parser;
 use log::{info, error};
 use std::process;
 use crate::config::{AppConfig, CliArgs};
-use crate::coordinator::Coordinator;
-use crate::exporter::ExportParams;
+use crate::export_coordinator::Coordinator;
+use crate::oracle_data_extractor::ExportParams;
 
 fn main() {
     // 1. Initialize Logging
@@ -119,7 +120,7 @@ fn main() {
                      field_delimiter: "\u{0010}".to_string(),
                  };
                  
-                 if let Err(e) = crate::exporter::export_table(params) {
+                 if let Err(e) = crate::oracle_data_extractor::export_table(params) {
                      error!("Export failed: {}", e);
                      process::exit(1);
                  }
@@ -149,16 +150,17 @@ fn main() {
                          output_dir: output.clone(),
                          schema: None, // Will use DB user
                          table: Some(table.clone()),
-                         parallel: None,
+                         parallel: args.parallel,
                          prefetch_rows: Some(5000),
                          exclude_tables: None,
                          enable_row_hash: None,
-                         cpu_percent: None,
+                         cpu_percent: args.cpu_percent,
                          field_delimiter: None,
                          schemas: None,
                          schemas_file: None,
                          tables: None,
-                         tables_file: None,
+                          tables_file: None,
+                          load_to_bq: Some(args.load),
                      },
                      bigquery: None,
                  };
