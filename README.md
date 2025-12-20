@@ -31,3 +31,9 @@ To create the portable Linux bundle for RHEL 7/8 environments:
 ./build_bundle.sh
 ```
 *(Requires Oracle Instant Client ZIP, see [Deployment Strategy](docs/DEPLOYMENT.md))*
+
+### Runtime Requirements
+The application uses **Oracle Instant Client**. You must set `LD_LIBRARY_PATH` to the location of `libclntsh.so` (usually the `lib/` directory in the bundle).
+```bash
+export LD_LIBRARY_PATH=$(pwd)/lib:$LD_LIBRARY_PATH
+```

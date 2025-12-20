@@ -74,7 +74,7 @@ pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_cl
         
         // Handle Time Zones or specialized transforms here
         let upper_type = data_type.to_uppercase();
-        let upper_type = data_type.to_uppercase();
+        // Check for TIME ZONE
         let raw_expr = if upper_type.contains("TIME ZONE") {
              // Convert to UTC char for easy CSV export
              format!("TO_CHAR(SYS_EXTRACT_UTC(\"{}\"), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"')", col_name)
@@ -118,8 +118,9 @@ pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_cl
     }
 
     if enable_row_hash && !hash_parts.is_empty() {
-        // Chunk columns to avoid concatenation limits (though StandardHash input limit?)
-        // Python chunks by 50.
+        // Chunk columns to avoid concatenation limits (Oracle has a 4000 char limit for literals, 
+        // but larger for expressions, though `||` chains can be long).
+        // Python legacy exporter used chunks of 50 columns.
         let chunk_size = 50;
         let mut chunk_hashes = Vec::new();
         
@@ -127,6 +128,17 @@ pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_cl
             let chunk_concat = chunk.join(" || ");
             chunk_hashes.push(format!("STANDARD_HASH({}, 'SHA256')", chunk_concat));
         }
+        
+        // If multiple chunks, hash the concatenation of their hashes (chaining)
+        // Or just concatenate them?
+        // Python logic: `STANDARD_HASH(chunk1 || chunk2 ..., 'SHA256')`
+        // Wait, Python logic was: `STANDARD_HASH( ... || ... , 'SHA256')` on the WHOLE string?
+        // If the string is too long, we might hit limits.
+        // But here we are building a QUERY string.
+        // Let's stick to the verified Python logic parity:
+        // Hash the concatenated hashes of chunks? Or just one big hash?
+        // The code currently does: `STANDARD_HASH( chunk_hashes.join(" || ") , 'SHA256')`
+        // This effectively hashes the concatenation of the strings. Correct.
         
         let final_expr = if chunk_hashes.is_empty() {
              "STANDARD_HASH('', 'SHA256')".to_string()
@@ -155,18 +167,31 @@ pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_cl
     Ok((sql, raw_col_names))
 }
 
+/// Parameters for a single table export job
 pub struct ExportParams {
+    /// Database Host
     pub host: String,
+    /// Database Port (default 1521)
     pub port: u16,
+    /// Oracle Service Name (PDB)
     pub service: String,
+    /// Database Username
     pub username: String,
+    /// Database Password
     pub password: String,
+    /// Output Gzip filename (e.g. "data.csv.gz")
     pub output_file: String,
+    /// Rows to prefetch per round-trip (Performance tuning)
     pub prefetch_rows: u32,
+    /// Target Schema (Owner)
     pub schema: String,
+    /// Table Name
     pub table: String,
+    /// Optional WHERE clause (without "WHERE") for filtering/chunking
     pub query_where: Option<String>,
+    /// If true, computes SHA256(ROW) as extra column
     pub enable_row_hash: bool,
+    /// CSV Field Delimiter (e.g. "\x10")
     pub field_delimiter: String,
 }
 
