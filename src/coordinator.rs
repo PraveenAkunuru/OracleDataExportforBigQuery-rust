@@ -44,13 +44,21 @@ pub struct TaskResult {
     pub status: String, // "SUCCESS", "FAILURE", or "SKIPPED"
     pub error: Option<String>,
     pub chunk_id: Option<u32>,
+    pub completed_at: String,
 }
 
 impl TaskResult {
     pub fn success(schema: String, table: String, chunk_id: Option<u32>, rows: u64, bytes: u64, duration: f64) -> Self {
         Self {
-            schema, table, chunk_id, rows_exported: rows, bytes_exported: bytes, duration_seconds: duration,
-            status: "SUCCESS".to_string(), error: None,
+            schema,
+            table,
+            rows_exported: rows,
+            bytes_exported: bytes,
+            duration_seconds: duration,
+            status: "SUCCESS".to_string(),
+            error: None,
+            chunk_id,
+            completed_at: chrono::Local::now().to_rfc3339(),
         }
     }
 
@@ -58,13 +66,21 @@ impl TaskResult {
         Self {
             schema, table, chunk_id, rows_exported: 0, bytes_exported: 0, duration_seconds: 0.0,
             status: "FAILURE".to_string(), error: Some(err),
+            completed_at: chrono::Local::now().to_rfc3339(),
         }
     }
 
     pub fn skipped(schema: String, table: String, chunk_id: Option<u32>) -> Self {
         Self {
-            schema, table, chunk_id, rows_exported: 0, bytes_exported: 0, duration_seconds: 0.0,
-            status: "SKIPPED".to_string(), error: None,
+            schema,
+            table,
+            rows_exported: 0,
+            bytes_exported: 0,
+            duration_seconds: 0.0,
+            status: "SKIPPED".to_string(),
+            error: None,
+            chunk_id,
+            completed_at: chrono::Local::now().to_rfc3339(),
         }
     }
 }
@@ -76,6 +92,38 @@ pub struct Coordinator {
 impl Coordinator {
     pub fn new(config: AppConfig) -> Self {
         Self { config }
+    }
+
+    pub fn resolve_tables(&self) -> Option<std::collections::HashSet<String>> {
+        let mut tables = std::collections::HashSet::new();
+        let mut has_source = false;
+
+        if let Some(list) = &self.config.export.tables {
+            for t in list {
+                tables.insert(t.clone());
+            }
+            has_source = true;
+        }
+
+        if let Some(path) = &self.config.export.tables_file {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                for line in content.lines() {
+                    let t = line.trim();
+                    if !t.is_empty() {
+                        tables.insert(t.to_string());
+                    }
+                }
+                has_source = true;
+            } else {
+                warn!("Could not read tables file: {}", path);
+            }
+        }
+
+        if has_source {
+            Some(tables)
+        } else {
+            None
+        }
     }
 
     /// Entry point for the coordination logic
@@ -197,7 +245,8 @@ impl Coordinator {
                 "skipped": skipped,
                 "failed": failed,
                 "total_duration_seconds": duration_secs,
-                "timestamp": chrono::Utc::now().to_rfc3339()
+                "timestamp": chrono::Local::now().to_rfc3339(),
+                "timezone": chrono::Local::now().offset().to_string()
             },
             "details": results
         });
@@ -260,6 +309,7 @@ impl Coordinator {
         }
 
         let schemas = self.resolve_schemas();
+        let whitelist = self.resolve_tables();
         let mut t_list = Vec::new();
         
         for s in schemas {
@@ -268,7 +318,14 @@ impl Coordinator {
                 Ok(tables) => {
                     info!("Found {} tables in {}", tables.len(), s);
                     for table in tables {
-                        t_list.push((s.clone(), table));
+                        // Filter by tables list if present
+                        if let Some(set) = &whitelist {
+                            if set.iter().any(|w| w.eq_ignore_ascii_case(&table)) {
+                                t_list.push((s.clone(), table));
+                            }
+                        } else {
+                            t_list.push((s.clone(), table));
+                        }
                     }
                 },
                 Err(e) => {
@@ -329,7 +386,7 @@ impl Coordinator {
         std::fs::create_dir_all(&data_dir)?;
         std::fs::create_dir_all(&config_dir)?;
 
-        let (names, types) = match metadata::get_table_columns(conn, schema, table) {
+        let (names, types, raw_strings) = match metadata::get_table_columns(conn, schema, table) {
             Ok(res) => res,
             Err(e) => {
                 warn!("Failed to get columns for {}.{}: {}", schema, table, e);
@@ -364,6 +421,12 @@ impl Coordinator {
             }
         };
 
+        let schema_path = format!("{}/schema.json", config_dir);
+        let enable_row_hash = self.config.export.enable_row_hash.unwrap_or(false);
+        if let Err(e) = crate::bigquery::generate_schema(&names, &types, &raw_strings, &schema_path, enable_row_hash) {
+            warn!("Failed to generate BigQuery schema for {}.{}: {}", schema, table, e);
+        }
+
         let agg_cols: Vec<String> = names.iter().zip(types.iter())
             .filter(|(_, t)| matches!(t, oracle::sql_type::OracleType::Number(_, _)))
             .take(3) 
@@ -374,17 +437,23 @@ impl Coordinator {
             Ok(stats) => {
                 let duration = start_time.elapsed().as_secs_f64();
                 let config_path = std::path::Path::new(&config_dir);
+                let project = self.config.bigquery.as_ref().map(|bq| bq.project.as_str()).unwrap_or("project");
+                let dataset = self.config.bigquery.as_ref().map(|bq| bq.dataset.as_str()).unwrap_or(schema);
+
                 if let Err(e) = crate::artifacts::save_all_artifacts(
                     config_path,
                     schema,
                     table,
                     &names,
                     &types,
+                    &raw_strings,
                     &stats,
                     oracle_ddl.as_deref(),
                     duration,
                     self.config.export.enable_row_hash.unwrap_or(false),
-                    self.config.export.field_delimiter.as_deref().unwrap_or("\u{0010}")
+                    self.config.export.field_delimiter.as_deref().unwrap_or("\u{0010}"),
+                    project,
+                    dataset
                 ) {
                     warn!("Failed to save artifacts for {}.{}: {}", schema, table, e);
                 } else {
@@ -526,6 +595,8 @@ mod tests {
                 field_delimiter: None,
                 schemas: None,
                 schemas_file: None,
+                tables: None,
+                tables_file: None,
             },
             bigquery: None,
         }

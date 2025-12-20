@@ -60,6 +60,10 @@ pub struct ExportConfig {
     pub schemas: Option<Vec<String>>,
     /// Path to a file containing a list of schemas (optional)
     pub schemas_file: Option<String>,
+    /// List of specific tables to export (optional)
+    pub tables: Option<Vec<String>>,
+    /// Path to a file containing a list of tables (optional)
+    pub tables_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

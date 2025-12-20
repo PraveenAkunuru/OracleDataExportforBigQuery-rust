@@ -29,25 +29,27 @@ pub fn save_all_artifacts(
     table: &str,
     columns: &[String],
     col_types: &[OracleType],
+    raw_types: &[String],
     stats: &ValidationStats,
     oracle_ddl: Option<&str>,
     duration_secs: f64,
     enable_row_hash: bool,
     field_delimiter: &str,
+    project: &str,
+    dataset: &str,
 ) -> std::io::Result<()> {
     // 1. Generate BigQuery DDL
-    let bq_ddl = generate_bigquery_ddl(schema, table, columns, col_types, enable_row_hash);
+    let bq_ddl = generate_bigquery_ddl(project, dataset, table, columns, col_types, raw_types, enable_row_hash);
     write_file(config_dir.join("bigquery.ddl"), &bq_ddl)?;
 
     // 1b. Generate BigQuery Schema JSON
     let schema_path = config_dir.join("schema.json");
-    // Call bigquery::generate_schema with enable_row_hash
-    if let Err(e) = crate::bigquery::generate_schema(columns, col_types, schema_path.to_str().unwrap(), enable_row_hash) {
+    if let Err(e) = crate::bigquery::generate_schema(columns, col_types, raw_types, schema_path.to_str().unwrap(), enable_row_hash) {
         warn!("Failed to generate schema.json: {}", e);
     }
     
     // 1c. Generate Column Mapping Doc (Parity)
-    let mapping_doc = generate_column_mapping_doc(schema, table, columns, col_types, enable_row_hash);
+    let mapping_doc = generate_column_mapping_doc(schema, table, columns, col_types, raw_types, enable_row_hash);
     write_file(config_dir.join("column_mapping.md"), &mapping_doc)?;
 
     // 2. Save Oracle DDL
@@ -69,16 +71,14 @@ pub fn save_all_artifacts(
     }
 
     // 4. Generate Validation SQL
-    let val_sql = generate_validation_sql(schema, table, stats);
+    let val_sql = generate_validation_sql(project, dataset, table, stats);
     write_file(config_dir.join("validation.sql"), &val_sql)?;
 
     // 5. Generate Reference Export SQL
-    // 5. Generate Reference Export SQL
-    let export_sql = generate_export_sql(schema, table, columns, col_types, enable_row_hash, field_delimiter);
+    let export_sql = generate_export_sql(schema, table, columns, col_types, raw_types, enable_row_hash, field_delimiter);
     write_file(config_dir.join("export.sql"), &export_sql)?;
 
     // 6. Generate Metadata JSON (Expanded)
-    // We merge stats with extra info to match Python's metadata.json structure roughly
     let metadata = json!({
         "table_name": table,
         "schema_name": schema,
@@ -86,7 +86,7 @@ pub fn save_all_artifacts(
         "export_timestamp": chrono::Utc::now().to_rfc3339(),
         "validation": stats,
         "export_duration_seconds": duration_secs,
-        "columns": generate_column_metadata(columns, col_types, enable_row_hash),
+        "columns": generate_column_metadata(columns, col_types, raw_types, enable_row_hash),
         "oracle_ddl_file": "oracle.ddl",
         "bigquery_ddl_file": "bigquery.ddl"
     });
@@ -104,12 +104,12 @@ fn write_file(path: PathBuf, content: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn generate_bigquery_ddl(schema: &str, table: &str, columns: &[String], col_types: &[OracleType], enable_row_hash: bool) -> String {
+fn generate_bigquery_ddl(project: &str, dataset: &str, table: &str, columns: &[String], col_types: &[OracleType], raw_strings: &[String], enable_row_hash: bool) -> String {
     let mut lines = Vec::new();
-    lines.push(format!("CREATE TABLE `{}.{}.{}` (", "project", schema, table)); // Placeholder project
+    lines.push(format!("CREATE TABLE `{}.{}.{}` (", project, dataset, table));
     
-    for (i, (name, otype)) in columns.iter().zip(col_types.iter()).enumerate() {
-        let bq_type = bigquery::map_oracle_to_bq_ddl(otype);
+    for (i, ((name, otype), rtype)) in columns.iter().zip(col_types.iter()).zip(raw_strings.iter()).enumerate() {
+        let bq_type = bigquery::map_oracle_to_bq_ddl(otype, Some(rtype));
         let comma = if i < columns.len() - 1 || enable_row_hash { "," } else { "" };
         lines.push(format!("  {} {}{}", name, bq_type, comma));
     }
@@ -139,7 +139,7 @@ bq load \
 "#, delimiter, schema, table)
 }
 
-fn generate_validation_sql(schema: &str, table: &str, stats: &ValidationStats) -> String {
+fn generate_validation_sql(project: &str, dataset: &str, table: &str, stats: &ValidationStats) -> String {
     let row_count = stats.row_count;
     let mut sql = format!(r#"-- Validation SQL for {}.{}
 -- Expected Row Count: {}
@@ -154,7 +154,7 @@ SELECT
     END as status,
     COUNT(*) - {} as diff
 FROM `{}.{}.{}`;
-"#, schema, table, row_count, row_count, row_count, row_count, "project", schema, table);
+"#, dataset, table, row_count, row_count, row_count, row_count, project, dataset, table);
 
     // Add Aggregate Checks
     if let Some(aggs) = &stats.aggregates {
@@ -170,7 +170,7 @@ SELECT
         ELSE 'FAIL'
     END as status
 FROM `{}.{}.{}`;
-"#, agg.column_name, agg.column_name, agg.value, agg.column_name, agg.value, "project", schema, table));
+"#, agg.column_name, agg.column_name, agg.value, agg.column_name, agg.value, project, dataset, table));
             }
         }
     }
@@ -190,19 +190,29 @@ FROM `{}.{}.{}`;
     sql
 }
 
-fn generate_export_sql(schema: &str, table: &str, columns: &[String], col_types: &[OracleType], enable_row_hash: bool, delimiter: &str) -> String {
+fn generate_export_sql(schema: &str, table: &str, columns: &[String], col_types: &[OracleType], raw_types: &[String], enable_row_hash: bool, delimiter: &str) -> String {
     let mut select_exprs = Vec::new();
 
 
-    for (name, otype) in columns.iter().zip(col_types.iter()) {
-        // 1. Column Expression
-        let expr = match otype {
-            OracleType::TimestampTZ(_) | OracleType::TimestampLTZ(_) => {
-                format!("TO_CHAR(SYS_EXTRACT_UTC(\"{}\"), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"')", name)
-            },
-            _ => format!("\"{}\"", name),
+    for (i, (name, _otype)) in columns.iter().zip(col_types.iter()).enumerate() {
+        let rtype = &raw_types[i].to_uppercase();
+        // 1. Column Expression (Matching main exporter logic for parity)
+        let expr = if rtype.contains("TIME ZONE") {
+            format!("TO_CHAR(SYS_EXTRACT_UTC(\"{}\"), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"')", name)
+        } else if rtype.contains("INTERVAL YEAR") {
+            format!("CASE WHEN \"{}\" IS NULL THEN NULL ELSE CASE WHEN EXTRACT(YEAR FROM \"{}\") < 0 OR EXTRACT(MONTH FROM \"{}\") < 0 THEN '-' ELSE '' END || ABS(EXTRACT(YEAR FROM \"{}\")) || '-' || ABS(EXTRACT(MONTH FROM \"{}\")) || ' 0 0:0:0' END", name, name, name, name, name)
+        } else if rtype.contains("INTERVAL DAY") {
+            format!("CASE WHEN \"{}\" IS NULL THEN NULL ELSE '0-0 ' || CASE WHEN EXTRACT(DAY FROM \"{}\") < 0 OR EXTRACT(HOUR FROM \"{}\") < 0 OR EXTRACT(MINUTE FROM \"{}\") < 0 OR EXTRACT(SECOND FROM \"{}\") < 0 THEN '-' ELSE '' END || ABS(EXTRACT(DAY FROM \"{}\")) || ' ' || ABS(EXTRACT(HOUR FROM \"{}\")) || ':' || ABS(EXTRACT(MINUTE FROM \"{}\")) || ':' || ABS(EXTRACT(SECOND FROM \"{}\")) END", name, name, name, name, name, name, name, name, name)
+        } else if rtype == "XMLTYPE" {
+            format!("REPLACE(REPLACE(sys.XMLType.getStringVal(\"{}\"), CHR(10), ''), CHR(13), '')", name)
+        } else if rtype == "JSON" {
+            format!("REPLACE(REPLACE(JSON_SERIALIZE(\"{}\"), CHR(10), ''), CHR(13), '')", name)
+        } else if rtype == "BOOLEAN" {
+            format!("CASE WHEN \"{}\" THEN 'true' ELSE 'false' END", name)
+        } else {
+            format!("\"{}\"", name)
         };
-        select_exprs.push(expr.clone());
+        select_exprs.push(expr);
     }
 
     // 2. Hash Part (Outside Loop since it aggregates all columns)
@@ -229,13 +239,14 @@ SPOOL OFF
 "#, delimiter, schema, table, cols, schema, table)
 }
 
-fn generate_column_metadata(columns: &[String], col_types: &[OracleType], enable_row_hash: bool) -> serde_json::Value {
+fn generate_column_metadata(columns: &[String], col_types: &[OracleType], raw_types: &[String], enable_row_hash: bool) -> serde_json::Value {
     let mut cols = Vec::new();
-    for (name, otype) in columns.iter().zip(col_types.iter()) {
+    for (i, (name, otype)) in columns.iter().zip(col_types.iter()).enumerate() {
         cols.push(json!({
             "name": name,
             "oracle_type": format!("{:?}", otype), // Debug representation
-            "bigquery_type": bigquery::map_oracle_to_bq(otype)
+            "raw_type": raw_types[i],
+            "bigquery_type": bigquery::map_oracle_to_bq(otype, Some(&raw_types[i]))
         }));
     }
     if enable_row_hash {
@@ -249,16 +260,16 @@ fn generate_column_metadata(columns: &[String], col_types: &[OracleType], enable
     serde_json::to_value(cols).unwrap()
 }
 
-fn generate_column_mapping_doc(schema: &str, table: &str, columns: &[String], col_types: &[OracleType], enable_row_hash: bool) -> String {
+fn generate_column_mapping_doc(schema: &str, table: &str, columns: &[String], col_types: &[OracleType], raw_strings: &[String], enable_row_hash: bool) -> String {
     let mut lines = Vec::new();
     lines.push(format!("# Column Mapping for {}.{}", schema, table));
     lines.push("".to_string());
-    lines.push("| Oracle Column | Oracle Type | BigQuery Type |".to_string());
-    lines.push("|--------------|-------------|---------------|".to_string());
+    lines.push("| Oracle Column | Oracle Type | Raw Type | BigQuery Type |".to_string());
+    lines.push("|--------------|-------------|----------|---------------|".to_string());
     
-    for (name, otype) in columns.iter().zip(col_types.iter()) {
-         let bq_type = bigquery::map_oracle_to_bq(otype);
-         lines.push(format!("| {} | {:?} | {} |", name, otype, bq_type));
+    for (i, (name, otype)) in columns.iter().zip(col_types.iter()).enumerate() {
+         let bq_type = bigquery::map_oracle_to_bq(otype, Some(&raw_strings[i]));
+         lines.push(format!("| {} | {:?} | {} | {} |", name, otype, raw_strings[i], bq_type));
     }
     
     if enable_row_hash {

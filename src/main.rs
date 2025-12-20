@@ -157,6 +157,8 @@ fn main() {
                          field_delimiter: None,
                          schemas: None,
                          schemas_file: None,
+                         tables: None,
+                         tables_file: None,
                      },
                      bigquery: None,
                  };

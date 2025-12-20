@@ -1,0 +1,14 @@
+database:
+  username: "TESTUSER"
+  password: "testpassword"
+  host: "localhost"
+  port: 1521
+  service: "FREEPDB1"
+
+export:
+  schema: "TESTUSER"
+  output_dir: "./export_extended"
+  parallel: 1
+  enable_row_hash: true
+  tables:
+    - "EXTENDED_TYPES_TEST"

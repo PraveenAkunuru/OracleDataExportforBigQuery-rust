@@ -27,6 +27,14 @@ const SQL_GET_PK: &str = "
       AND k.table_name = :2
     ORDER BY c.position
 ";
+const SQL_DROP_PARALLEL_TASK: &str = "BEGIN DBMS_PARALLEL_EXECUTE.DROP_TASK(:1); END;";
+pub const SQL_GET_COLUMNS: &str = "
+    SELECT column_name, data_type 
+    FROM all_tab_columns 
+    WHERE table_name = :1 
+      AND owner = :2 
+    ORDER BY column_id
+";
 
 #[derive(Debug, Clone, Serialize)]
 /// Basic table metadata summary
@@ -163,24 +171,47 @@ pub fn generate_chunks(conn: &Connection, schema: &str, table: &str, chunk_count
     }
 
     // 5. Cleanup
-    conn.execute("BEGIN DBMS_PARALLEL_EXECUTE.DROP_TASK(:1); END;", &[&task_name])?;
+    conn.execute(SQL_DROP_PARALLEL_TASK, &[&task_name])?;
     
     Ok(chunks)
 }
 
 /// Retrieves column names and types for a table.
 /// Useful for BigQuery schema generation.
-pub fn get_table_columns(conn: &Connection, schema: &str, table: &str) -> Result<(Vec<String>, Vec<oracle::sql_type::OracleType>)> {
-    // Note: We use a dynamic 1=0 query to get column info robustly via rust-oracle
+pub fn get_table_columns(conn: &Connection, schema: &str, table: &str) -> Result<(Vec<String>, Vec<oracle::sql_type::OracleType>, Vec<String>)> {
+    // 1. Get exact OracleType via dummy query (best for Numeric precision/scale)
     let sql_dummy = format!("SELECT * FROM \"{}\".\"{}\" WHERE 1=0", schema, table);
     let mut stmt = conn.statement(&sql_dummy).build()?;
     let rows = stmt.query(&[])?;
-    
     let col_infos = rows.column_info();
-    let names: Vec<String> = col_infos.iter().map(|c| c.name().to_string()).collect();
-    let types: Vec<oracle::sql_type::OracleType> = col_infos.iter().map(|c| c.oracle_type().clone()).collect();
     
-    Ok((names, types))
+    // 2. Get Data Type String via ALL_TAB_COLUMNS (best for advanced types like JSON/BOOLEAN/XMLTYPE)
+    let mut stmt_meta = conn.statement(SQL_GET_COLUMNS).build()?;
+    let rows_meta = stmt_meta.query(&[&table.to_uppercase(), &schema.to_uppercase()])?;
+    
+    let mut type_strings = std::collections::HashMap::new();
+    for row_res in rows_meta {
+        let row = row_res?;
+        let name: String = row.get(0)?;
+        let data_type: String = row.get(1)?;
+        type_strings.insert(name.to_uppercase(), data_type);
+    }
+
+    let mut names = Vec::new();
+    let mut types = Vec::new();
+    let mut strings = Vec::new();
+
+    for c in col_infos {
+        let name = c.name().to_string();
+        let name_upper = name.to_uppercase();
+        let type_str = type_strings.get(&name_upper).cloned().unwrap_or_else(|| "UNKNOWN".to_string());
+        
+        names.push(name);
+        types.push(c.oracle_type().clone());
+        strings.push(type_str);
+    }
+    
+    Ok((names, types, strings))
 }
 
 /// Fetches the Oracle DDL for a table using DBMS_METADATA.GET_DDL

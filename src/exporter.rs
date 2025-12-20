@@ -40,7 +40,6 @@ pub fn format_timestamp(ts: &Timestamp) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oracle::sql_type::Timestamp;
 
     #[test]
     fn test_format_timestamp() {
@@ -58,15 +57,11 @@ mod tests {
     }
 }
 
+use crate::metadata;
+
 /// Builds the SELECT query dynamically based on table metadata
 pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_clause: Option<&String>, enable_row_hash: bool) -> Result<(String, Vec<String>)> {
-    let sql_meta = "SELECT column_name, data_type 
-                    FROM all_tab_columns 
-                    WHERE table_name = :1 
-                    AND owner = :2 
-                    ORDER BY column_id";
-    
-    let mut stmt = conn.statement(sql_meta).build()?;
+    let mut stmt = conn.statement(metadata::SQL_GET_COLUMNS).build()?;
     let table_param: &dyn oracle::sql_type::ToSql = &table;
     let schema_param: &dyn oracle::sql_type::ToSql = &schema;
     let rows = stmt.query(&[table_param, schema_param])?;
@@ -84,10 +79,30 @@ pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_cl
         
         // Handle Time Zones or specialized transforms here
         let upper_type = data_type.to_uppercase();
-        // Check for TIME ZONE
         let raw_expr = if upper_type.contains("TIME ZONE") {
              // Convert to UTC char for easy CSV export
              format!("TO_CHAR(SYS_EXTRACT_UTC(\"{}\"), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"')", col_name)
+        } else if upper_type.contains("INTERVAL YEAR") {
+             // Robust Interval Year to Month transformation for BigQuery
+             format!("CASE WHEN \"{}\" IS NULL THEN NULL ELSE \
+                      CASE WHEN EXTRACT(YEAR FROM \"{}\") < 0 OR EXTRACT(MONTH FROM \"{}\") < 0 THEN '-' ELSE '' END || \
+                      ABS(EXTRACT(YEAR FROM \"{}\")) || '-' || ABS(EXTRACT(MONTH FROM \"{}\")) || ' 0 0:0:0' END", 
+                      col_name, col_name, col_name, col_name, col_name)
+        } else if upper_type.contains("INTERVAL DAY") {
+             // Robust Interval Day to Second transformation for BigQuery
+             format!("CASE WHEN \"{}\" IS NULL THEN NULL ELSE \
+                      '0-0 ' || CASE WHEN EXTRACT(DAY FROM \"{}\") < 0 OR EXTRACT(HOUR FROM \"{}\") < 0 OR \
+                      EXTRACT(MINUTE FROM \"{}\") < 0 OR EXTRACT(SECOND FROM \"{}\") < 0 THEN '-' ELSE '' END || \
+                      ABS(EXTRACT(DAY FROM \"{}\")) || ' ' || ABS(EXTRACT(HOUR FROM \"{}\")) || ':' || \
+                      ABS(EXTRACT(MINUTE FROM \"{}\")) || ':' || ABS(EXTRACT(SECOND FROM \"{}\")) END",
+                      col_name, col_name, col_name, col_name, col_name, col_name, col_name, col_name, col_name)
+        } else if upper_type == "XMLTYPE" {
+             format!("REPLACE(REPLACE(sys.XMLType.getStringVal(\"{}\"), CHR(10), ''), CHR(13), '')", col_name)
+        } else if upper_type == "JSON" {
+             // Use JSON_SERIALIZE if Oracle 21c/23c, else it might have been CLOB with constraint
+             format!("REPLACE(REPLACE(JSON_SERIALIZE(\"{}\"), CHR(10), ''), CHR(13), '')", col_name)
+        } else if upper_type == "BOOLEAN" {
+             format!("CASE WHEN \"{}\" THEN 'true' ELSE 'false' END", col_name)
         } else {
              format!("\"{}\"", col_name)
         };
