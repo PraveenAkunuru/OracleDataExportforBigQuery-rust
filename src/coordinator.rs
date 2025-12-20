@@ -131,8 +131,9 @@ impl Coordinator {
             "details": results
         });
         
+        let timestamp_str = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
         let out_dir = &self.config.export.output_dir;
-        let path = format!("{}/report.json", out_dir);
+        let path = format!("{}/report_{}.json", out_dir, timestamp_str);
         let mut file = File::create(path)?;
         serde_json::to_writer_pretty(&mut file, &report)?;
         
