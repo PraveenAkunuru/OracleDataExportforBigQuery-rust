@@ -79,7 +79,7 @@ fn main() {
                  
                  let params = ExportParams {
                      host: args.host.as_ref().unwrap().clone(),
-                     port: 1521, // FIXME: Add port to CliArgs if needed, defaulting 1521
+                     port: args.port.unwrap_or(1521),
                      service: args.service.as_ref().unwrap().clone(),
                      username: args.username.as_ref().unwrap().clone(),
                      password,
@@ -115,7 +115,7 @@ fn main() {
                          username: args.username.as_ref().unwrap().clone(),
                          password: Some(password),
                          host: args.host.as_ref().unwrap().clone(),
-                         port: 1521, // FIXME
+                         port: args.port.unwrap_or(1521),
                          service: args.service.as_ref().unwrap_or(&"FREEPDB1".to_string()).clone(),
                      },
                      export: crate::config::ExportConfig {

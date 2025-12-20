@@ -208,29 +208,31 @@ pub fn get_ddl(conn: &Connection, schema: &str, table: &str) -> Option<String> {
 }
 
 /// Fetches the Primary Key column(s) for a table.
-/// Returns a comma-separated string of columns if composite, or single column.
+/// Returns a list of columns if composite, or single column.
 /// Returns None if no PK exists.
-pub fn get_primary_key(conn: &Connection, schema: &str, table: &str) -> Result<Option<String>> {
+pub fn get_primary_key(conn: &Connection, schema: &str, table: &str) -> Result<Option<Vec<String>>> {
     let sql = "
-        SELECT min(column_name) -- Simplified for single PK, or use aggregation for composite
+        SELECT column_name
         FROM all_cons_columns c
         JOIN all_constraints k ON c.constraint_name = k.constraint_name AND c.owner = k.owner
         WHERE k.constraint_type = 'P'
           AND k.owner = :1
           AND k.table_name = :2
+        ORDER BY c.position
     ";
     
-    // Note: handling composite keys correctly for ORA_HASH(col1 || col2) is complex.
-    // For now, let's just grab the first column of the PK or a concat if easy.
-    // Actually, ORA_HASH only takes one expression.
-    // So if composite, we might need `ORA_HASH(col1 || '_' || col2)`.
-    // Let's first just try to get the single PK column, or the 'first' one if composite.
-    
     let rows = conn.query(sql, &[&schema.to_uppercase(), &table.to_uppercase()])?;
-    if let Some(Ok(row)) = rows.into_iter().next() {
-        let col: Option<String> = row.get(0)?;
-        Ok(col) // This will be None if no rows or NULL (shouldn't be null if PK exists)
-    } else {
+    let mut cols = Vec::new();
+    
+    for row_result in rows {
+        let row = row_result?;
+        let col: String = row.get(0)?;
+        cols.push(col);
+    }
+    
+    if cols.is_empty() {
         Ok(None)
+    } else {
+        Ok(Some(cols))
     }
 }

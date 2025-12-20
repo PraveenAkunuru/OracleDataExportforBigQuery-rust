@@ -1,8 +1,7 @@
 use oracle::{Connection, Result};
 use serde::Serialize;
 use log::{info, warn};
-use std::fs::File;
-use std::io::Write;
+
 
 #[derive(Serialize, Debug)]
 pub struct ValidationStats {
@@ -19,7 +18,7 @@ pub struct ColumnAggregate {
     pub value: String,
 }
 
-pub fn validate_table(conn: &Connection, schema: &str, table: &str, pk_col: Option<&str>, agg_cols: Option<&[String]>) -> Result<ValidationStats> {
+pub fn validate_table(conn: &Connection, schema: &str, table: &str, pk_cols: Option<&[String]>, agg_cols: Option<&[String]>) -> Result<ValidationStats> {
     info!("Validating {}.{}", schema, table);
     
     // Tier 1: Row Count
@@ -33,27 +32,28 @@ pub fn validate_table(conn: &Connection, schema: &str, table: &str, pk_col: Opti
 
     // Tier 2: PK Hash (if PK provided)
     let mut pk_hash = None;
-    if let Some(pk) = pk_col {
-        // Use STANDARD_HASH on the PK column.
-        // SUM(ORA_HASH(...)) is also good but STANDARD_HASH is more collision resistant for DVT.
-        // DVT often uses: SELECT SUM(ORA_HASH(column_name)) ...
-        // Let's use SUM(ORA_HASH) as it returns a Number, easier to compare than raw bytes sometimes, 
-        // but STANDARD_HASH is better for "Fingerprinting".
-        // The user asked for "efficient". SUM(ORA_HASH) is standard Oracle efficient way.
-        // Let's stick to SUM(ORA_HASH(concat cols)) or just simple col.
-        
-        let hash_sql = format!("SELECT SUM(ORA_HASH(\"{}\")) FROM \"{}\".\"{}\"", pk, schema, table);
-        // Note: ORA_HASH returns NUMBER.
-        match conn.query(&hash_sql, &[]) {
-            Ok(mut rows) => {
-               if let Some(Ok(r)) = rows.next() {
-                   let val: Option<String> = r.get(0)?; // Use String to avoid u128 issues
-                   // Oracle NUMBER can be large. String is safest.
-                   let val_str = val; 
-                   pk_hash = val_str;
-               }
-            },
-            Err(e) => warn!("Failed to compute PK hash: {}", e),
+    if let Some(pks) = pk_cols {
+        if !pks.is_empty() {
+             // Construct Hash Expression
+             // Single: "COL"
+             // Composite: "COL1" || '_' || "COL2" ...
+             let hash_expr = if pks.len() == 1 {
+                 format!("\"{}\"", pks[0])
+             } else {
+                 pks.iter().map(|c| format!("\"{}\"", c)).collect::<Vec<_>>().join(" || '_' || ")
+             };
+             
+             let hash_sql = format!("SELECT SUM(ORA_HASH({})) FROM \"{}\".\"{}\"", hash_expr, schema, table);
+             
+             match conn.query(&hash_sql, &[]) {
+                 Ok(mut rows) => {
+                    if let Some(Ok(r)) = rows.next() {
+                        let val: Option<String> = r.get(0)?; 
+                        pk_hash = val;
+                    }
+                 },
+                 Err(e) => warn!("Failed to compute PK hash: {}", e),
+             }
         }
     }
 
@@ -62,9 +62,6 @@ pub fn validate_table(conn: &Connection, schema: &str, table: &str, pk_col: Opti
     if let Some(cols) = agg_cols {
         let mut agg_results = Vec::new();
         for col in cols {
-            // Try SUM for now, need type info to separate MIN/MAX for dates? 
-            // For simplicity, just SUM(col) and ignore if it fails (e.g. non-numeric).
-            // Actually, we should probably check type or just try.
             let agg_sql = format!("SELECT SUM(\"{}\") FROM \"{}\".\"{}\"", col, schema, table);
             if let Ok(mut rows) = conn.query(&agg_sql, &[]) {
                 if let Some(Ok(r)) = rows.next() {
@@ -92,9 +89,4 @@ pub fn validate_table(conn: &Connection, schema: &str, table: &str, pk_col: Opti
     })
 }
 
-pub fn write_validation_report(stats: &ValidationStats, path: &str) -> std::io::Result<()> {
-    let json = serde_json::to_string_pretty(stats)?;
-    let mut file = File::create(path)?;
-    file.write_all(json.as_bytes())?;
-    Ok(())
-}
+

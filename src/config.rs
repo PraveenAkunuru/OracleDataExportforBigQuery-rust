@@ -56,6 +56,8 @@ pub struct CliArgs {
     #[arg(long)]
     pub service: Option<String>,
     #[arg(long)]
+    pub port: Option<u16>,
+    #[arg(long)]
     pub table: Option<String>,
     #[arg(short, long)]
     pub output: Option<String>,
@@ -82,6 +84,7 @@ impl AppConfig {
         if let Some(u) = &args.username { self.database.username = u.clone(); }
         if let Some(p) = &args.password { self.database.password = Some(p.clone()); }
         if let Some(h) = &args.host { self.database.host = h.clone(); }
+        if let Some(p) = args.port { self.database.port = p; }
         if let Some(s) = &args.service { self.database.service = s.clone(); }
         if let Some(t) = &args.table { self.export.table = Some(t.clone()); }
         if let Some(o) = &args.output { self.export.output_dir = o.clone(); }

@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use log::{info, warn};
 use oracle::sql_type::OracleType;
-use serde::Serialize;
+
 use serde_json::json;
 
 use crate::validation::ValidationStats;

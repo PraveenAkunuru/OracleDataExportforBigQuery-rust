@@ -1,5 +1,5 @@
 use crate::config::AppConfig;
-use crate::metadata::{self, TableMetadata};
+use crate::metadata;
 use crate::exporter::{self, ExportParams};
 use log::{info, error, warn};
 use std::sync::{Arc, Mutex};
@@ -7,6 +7,8 @@ use std::thread;
 use crossbeam_channel::{unbounded, Sender, Receiver};
 use num_cpus;
 use oracle::Connection;
+use serde::Serialize;
+use std::fs::File;
 
 /// Task represents a single unit of work (exporting a table or a chunk)
 #[derive(Debug, Clone)]
@@ -16,6 +18,16 @@ pub struct ExportTask {
     pub chunk_id: Option<u32>,
     pub query_where: Option<String>,
     pub output_file: String,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct TaskResult {
+    pub schema: String,
+    pub table: String,
+    pub chunk_id: Option<u32>,
+    pub status: String, // "SUCCESS" or "FAILURE"
+    pub error: Option<String>,
+    pub duration_seconds: f64,
 }
 
 pub struct Coordinator {
@@ -35,23 +47,51 @@ impl Coordinator {
         let (tx, rx): (Sender<ExportTask>, Receiver<ExportTask>) = unbounded();
         
         // 1. Discover Work
-        // We do this in a separate scope or thread, or just before spawning workers.
-        // For simplicity, we discover first, then feed the queue.
         self.discover_and_plan_tasks(tx)?;
 
         // 2. Spawn Workers
         let mut handles = Vec::new();
-        let config_clone = self.config.clone(); // Clone config for workers
+        let config_clone = self.config.clone();
+        
+        // Shared results vector
+        let results = Arc::new(Mutex::new(Vec::new()));
         
         for i in 0..max_threads {
             let rx_worker = rx.clone();
             let config_worker = config_clone.clone();
+            let results_worker = results.clone();
             
             let handle = thread::spawn(move || {
                 info!("Worker {} started", i);
                 while let Ok(task) = rx_worker.recv() {
-                    if let Err(e) = Self::execute_task(&config_worker, &task) {
-                        error!("Task failed: {:?} Error: {}", task, e);
+                    let start = std::time::Instant::now();
+                    let res = Self::execute_task(&config_worker, &task);
+                    let duration = start.elapsed().as_secs_f64();
+                    
+                    let task_result = match res {
+                        Ok(_) => TaskResult {
+                            schema: task.schema,
+                            table: task.table,
+                            chunk_id: task.chunk_id,
+                            status: "SUCCESS".to_string(),
+                            error: None,
+                            duration_seconds: duration,
+                        },
+                        Err(e) => {
+                            error!("Task failed: {:?} Error: {}", task, e);
+                            TaskResult {
+                                schema: task.schema,
+                                table: task.table,
+                                chunk_id: task.chunk_id,
+                                status: "FAILURE".to_string(),
+                                error: Some(e.to_string()),
+                                duration_seconds: duration,
+                            }
+                        }
+                    };
+                    
+                    if let Ok(mut r) = results_worker.lock() {
+                        r.push(task_result);
                     }
                 }
                 info!("Worker {} finished", i);
@@ -65,12 +105,41 @@ impl Coordinator {
         }
         
         info!("All export tasks completed.");
+        
+        // 3. Generate Report
+        if let Ok(final_results) = results.lock() {
+            self.generate_report(&final_results)?;
+        }
+
+        Ok(())
+    }
+    
+    fn generate_report(&self, results: &[TaskResult]) -> std::io::Result<()> {
+        let total = results.len();
+        let success = results.iter().filter(|r| r.status == "SUCCESS").count();
+        let failed = total - success;
+        
+        info!("Report: Total={}, Success={}, Failed={}", total, success, failed);
+        
+        let report = serde_json::json!({
+            "summary": {
+                "total_tasks": total,
+                "success": success,
+                "failed": failed,
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            },
+            "details": results
+        });
+        
+        let out_dir = &self.config.export.output_dir;
+        let path = format!("{}/report.json", out_dir);
+        let mut file = File::create(path)?;
+        serde_json::to_writer_pretty(&mut file, &report)?;
+        
         Ok(())
     }
 
     fn calculate_concurrency(&self) -> usize {
-        // User requested: "check number of cores and only use about 80%"
-        // If config.export.parallel is set, override; otherwise dynamic.
         if let Some(p) = self.config.export.parallel {
             return p;
         }
@@ -88,19 +157,15 @@ impl Coordinator {
     }
 
     fn discover_and_plan_tasks(&self, tx: Sender<ExportTask>) -> Result<(), Box<dyn std::error::Error>> {
-        // Connect to discover tables
         let db = &self.config.database;
         let conn_string = format!("//{}:{}/{}", db.host, db.port, db.service);
         let conn = Connection::connect(&db.username, db.password.as_deref().unwrap_or(""), &conn_string)?;
         
-        // Determine scope
         let tables_to_process = if let Some(t) = &self.config.export.table {
             vec![t.clone()]
         } else if let Some(s) = &self.config.export.schema {
             metadata::get_tables(&conn, s)?
         } else {
-            // Default to USER tables if nothing specified? Or usage error?
-            // For now assume config has schema if table is missing.
             warn!("No schema or table specified in config. Exporting nothing.");
             vec![]
         };
@@ -110,7 +175,6 @@ impl Coordinator {
         std::fs::create_dir_all(out_dir)?;
 
         for table in tables_to_process {
-            // Check Exclusion
             if let Some(excludes) = &self.config.export.exclude_tables {
                 if excludes.iter().any(|x| x.eq_ignore_ascii_case(&table)) {
                     info!("Skipping excluded table: {}", table);
@@ -118,36 +182,25 @@ impl Coordinator {
                 }
             }
 
-            // Estimate Size
             let size_gb = metadata::get_table_size_gb(&conn, schema, &table)?;
             info!("Table {}.{} is ~{:.2} GB", schema, table, size_gb);
 
-            // Decision: Chunk or Single?
-            // "Split by Size < 1GB"
-            
-            // 0. CREATE DIRECTORIES
             let table_dir = format!("{}/{}/{}", out_dir, schema, table);
             let data_dir = format!("{}/data", table_dir);
             let config_dir = format!("{}/config", table_dir);
             std::fs::create_dir_all(&data_dir)?;
             std::fs::create_dir_all(&config_dir)?;
 
-            // 1. GENERATE ARTIFACTS
-            // Retrieve Columns (needed for Schema & DDL)
             match metadata::get_table_columns(&conn, schema, &table) {
                 Ok((names, types)) => {
-                    // Start Timer
                     let start_time = std::time::Instant::now();
-
-                    // Retrieve DDL
                     let oracle_ddl = metadata::get_ddl(&conn, schema, &table);
                     
-                    // Identify PK and Numeric Columns for Validation
-                    // 1. Try to get actual Primary Key
-                    let mut pk_col = match metadata::get_primary_key(&conn, schema, &table) {
-                        Ok(Some(pk)) => {
-                            info!("Identified Primary Key for {}.{}: {}", schema, table, pk);
-                            Some(pk)
+                    // Identify PK
+                    let pk_cols = match metadata::get_primary_key(&conn, schema, &table) {
+                        Ok(Some(pks)) => {
+                            info!("Identified Primary Key for {}.{}: {:?}", schema, table, pks);
+                            Some(pks)
                         },
                         Ok(None) => {
                             info!("No Primary Key found for {}.{}. Validation will skip PK hash.", schema, table);
@@ -158,12 +211,6 @@ impl Coordinator {
                             None
                         }
                     };
-                    
-                    // IF NO PK, maybe fallback to Row Hash?
-                    // User asked "What if table does not have a pk?".
-                    // If no PK, we should probably SKIP pk_hash (return None), which is what we do above.
-                    // Or we could try to find a unique index?
-                    // For now, let's respect the semantic "PK Hash". If no PK, no PK Hash.
 
                     let agg_cols: Vec<String> = names.iter().zip(types.iter())
                         .filter(|(_, t)| matches!(t, oracle::sql_type::OracleType::Number(_, _)))
@@ -171,20 +218,10 @@ impl Coordinator {
                         .map(|(n, _)| n.clone())
                         .collect();
 
-                    // Validate (Baseline stats)
-                    match crate::validation::validate_table(&conn, schema, &table, pk_col.as_deref(), Some(&agg_cols)) {
+                    // Validate
+                    match crate::validation::validate_table(&conn, schema, &table, pk_cols.as_deref(), Some(&agg_cols)) {
                         Ok(stats) => {
-                            // Calculate provisional duration (metadata gen time only, real export is later).
-                            // Actually, user wants EXPORT duration. This is tricky because export happens in WORKERS later.
-                            // The Python legacy app often estimated or summed up worker times, or just measured "Planning + Validation".
-                            // If we want total time, we must wait for workers. But artifacts are generated BEFORE export here.
-                            // Compromise: We populate "export_duration_seconds" with *Planning/Validation* time here,
-                            // OR we leave it 0.0 and update it later? 
-                            // Creating metadata.json NOW is required for parity (artifacts exist before load).
-                            // Let's use the time taken for validation/planning as a placeholder, or maybe we accept it's mostly validation time.
                             let duration = start_time.elapsed().as_secs_f64();
-
-                            // Save ALL artifacts
                             let config_path = std::path::Path::new(&config_dir);
                             if let Err(e) = crate::artifacts::save_all_artifacts(
                                 config_path,
@@ -213,52 +250,47 @@ impl Coordinator {
             if size_gb > 1.0 { // Threshold 1GB
                 let chunk_count = (size_gb / 1.0).ceil() as u32;
                 info!("Splitting {} into {} chunks", table, chunk_count);
-                let chunks = metadata::generate_chunks(&conn, schema, &table, chunk_count)?;
-                
-                for chunk in chunks {
-                     let filename = format!("{}/data_chunk_{:04}.csv.gz", data_dir, chunk.chunk_id);
-                     if std::path::Path::new(&filename).exists() {
-                         info!("Skipping existing chunk: {}", filename);
-                         continue;
-                     }
-
-                     let query_where = format!("ROWID BETWEEN '{}' AND '{}'", chunk.start_rowid, chunk.end_rowid);
-                     
-                     tx.send(ExportTask {
+                match metadata::generate_chunks(&conn, schema, &table, chunk_count) {
+                    Ok(chunks) => {
+                        for chunk in chunks {
+                             let filename = format!("{}/data_chunk_{:04}.csv.gz", data_dir, chunk.chunk_id);
+                             if std::path::Path::new(&filename).exists() {
+                                 info!("Skipping existing chunk: {}", filename);
+                                 continue;
+                             }
+                             let query_where = format!("ROWID BETWEEN '{}' AND '{}'", chunk.start_rowid, chunk.end_rowid);
+                             tx.send(ExportTask {
+                                 schema: schema.to_string(),
+                                 table: table.clone(),
+                                 chunk_id: Some(chunk.chunk_id),
+                                 query_where: Some(query_where),
+                                 output_file: filename,
+                             })?;
+                        }
+                    },
+                    Err(e) => warn!("Failed to generate chunks for {}: {}", table, e)
+                }
+            } else {
+                // Single File
+                let filename = format!("{}/data.csv.gz", data_dir);
+                if std::path::Path::new(&filename).exists() {
+                    info!("Skipping existing file: {}", filename);
+                } else {
+                    tx.send(ExportTask {
                          schema: schema.to_string(),
                          table: table.clone(),
-                         chunk_id: Some(chunk.chunk_id),
-                         query_where: Some(query_where),
+                         chunk_id: None,
+                         query_where: None,
                          output_file: filename,
-                     })?;
+                    })?;
                 }
-                } else {
-                    // Single File
-                    let filename = format!("{}/data.csv.gz", data_dir);
-                    
-                    if std::path::Path::new(&filename).exists() {
-                        info!("Skipping existing file: {}", filename);
-                    } else {
-                        tx.send(ExportTask {
-                             schema: schema.to_string(),
-                             table: table.clone(),
-                             chunk_id: None,
-                             query_where: None,
-                             output_file: filename,
-                        })?;
-                    }
-                }
-            } // End of table loop
+            }
+        }
         
         Ok(())
     }
 
     fn execute_task(config: &AppConfig, task: &ExportTask) -> Result<(), Box<dyn std::error::Error>> {
-        // Map AppConfig to ExportParams
-        // We establish a FRESH connection for each worker/task to ensure thread safety
-        // ODPI-C connections are not thread-safe across threads usually without mutexes, 
-        // so dedicated connection per task is safest and simplest in Rust.
-        
         let db = &config.database;
         let params = ExportParams {
             host: db.host.clone(),
@@ -283,8 +315,8 @@ impl Coordinator {
                 Ok(())
             },
             Err(e) => {
-                error!("Failed task: {}.{} (Chunk: {:?}): {}", task.schema, task.table, task.chunk_id, e);
-                Err(Box::new(e)) // Convert oracle::Error to Box<dyn Error> if compatible
+                // error!("Failed task: ...") log handled by caller
+                Err(Box::new(e)) 
             }
         }
     }
