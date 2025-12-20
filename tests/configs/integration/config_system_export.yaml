@@ -1,0 +1,16 @@
+database:
+  username: "system"
+  password: "password"
+  host: "localhost"
+  port: 1521
+  service: "XE"
+export:
+  output_dir: "./export_test_output"
+  # schema: "SYSTEM" # Defaults to username if omitted
+  # We export all tables in SYSTEM schema. 
+  # Warning: SYSTEM in Oracle can have many internal tables.
+  # We might want to exclude very large internal logs usually, but for "all tables" we try.
+  parallel: 4
+  enable_row_hash: true
+  cpu_percent: 50
+  prefetch_rows: 1000

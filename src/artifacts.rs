@@ -1,3 +1,16 @@
+//! # Artifacts Module
+//!
+//! Responsible for generating all "sidecar" files and documentation for an exported table.
+//!
+//! ## Generated Files
+//! - `bigquery.ddl`: `CREATE TABLE` statement for BQ.
+//! - `schema.json`: JSON Schema for BQ Load jobs.
+//! - `metadata.json`: Comprehensive structured metadata (stats, columns, timings).
+//! - `oracle.ddl`: Original Oracle DDL (for reference).
+//! - `load_command.sh`: Ready-to-run `bq load` shell command.
+//! - `export.sql`: SQLcl-compatible script to reproduce the export manually.
+//! - `validation.sql`: SQL script to verify data integrity in BigQuery after load.
+
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -179,7 +192,7 @@ FROM `{}.{}.{}`;
 
 fn generate_export_sql(schema: &str, table: &str, columns: &[String], col_types: &[OracleType], enable_row_hash: bool, delimiter: &str) -> String {
     let mut select_exprs = Vec::new();
-    let mut hash_parts = Vec::new();
+
 
     for (name, otype) in columns.iter().zip(col_types.iter()) {
         // 1. Column Expression
@@ -190,37 +203,11 @@ fn generate_export_sql(schema: &str, table: &str, columns: &[String], col_types:
             _ => format!("\"{}\"", name),
         };
         select_exprs.push(expr.clone());
-
-        // 2. Hash Part
-        if enable_row_hash {
-             let skip = matches!(otype, OracleType::BLOB | OracleType::CLOB | OracleType::NCLOB | OracleType::BFILE | OracleType::Long | OracleType::Xml);
-             // Note: Raw/LongRaw handled? Default matches Raw to Hash?
-             // Python excluded "LONG RAW". rust-oracle has internal types.
-             // We'll skip matches!
-             if !skip {
-                 // RAW -> RAWTOHEX?
-                 let hash_input = match otype {
-                     OracleType::Raw(_) => format!("RAWTOHEX(\"{}\")", name),
-                     OracleType::Rowid => format!("ROWIDTOCHAR(\"{}\")", name),
-                     OracleType::TimestampTZ(_) | OracleType::TimestampLTZ(_) => expr.clone(), // Already formatted
-                     _ => format!("TO_CHAR(\"{}\")", name),
-                 };
-                 hash_parts.push(format!("STANDARD_HASH(COALESCE({}, ''), 'SHA256')", hash_input));
-             }
-        }
     }
 
+    // 2. Hash Part (Outside Loop since it aggregates all columns)
     if enable_row_hash {
-        let chunk_size = 50;
-        let mut chunk_hashes = Vec::new();
-        if hash_parts.is_empty() {
-             select_exprs.push("STANDARD_HASH('', 'SHA256') AS ROW_HASH".to_string());
-        } else {
-             for chunk in hash_parts.chunks(chunk_size) {
-                 chunk_hashes.push(format!("STANDARD_HASH({}, 'SHA256')", chunk.join(" || ")));
-             }
-             select_exprs.push(format!("STANDARD_HASH({}, 'SHA256') AS ROW_HASH", chunk_hashes.join(" || ")));
-        }
+        select_exprs.push(crate::sql_utils::build_row_hash_select(columns, col_types));
     }
 
     let cols = select_exprs.join(", ");

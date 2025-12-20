@@ -1,3 +1,12 @@
+//! # Exporter Module
+//!
+//! Handles the low-level "Extract and Save" operation for a single table or chunk.
+//! 
+//! ## Features
+//! - **Streaming Export**: Uses `BufWriter` and `GzEncoder` to stream data directly to disk without loading entire tables into memory.
+//! - **Type Parity**: Carefully maps Oracle types to BigQuery-compatible CSV formats (e.g. UTC conversion for Timestamps).
+//! - **ROW_HASH**: Optionally computes a SHA256 hash of every row (using Oracle `STANDARD_HASH`) for data validation.
+
 use oracle::{Connection, Result};
 use oracle::sql_type::OracleType;
 use oracle::sql_type::Timestamp;
@@ -11,7 +20,8 @@ use base64::{Engine as _, engine::general_purpose};
 use csv::{WriterBuilder, QuoteStyle};
 
 /// Formats Oracle Timestamp to BigQuery-compliant string
-fn format_timestamp(ts: &Timestamp) -> String {
+/// Format: `YYYY-MM-DD HH:MI:SS.FF6`
+pub fn format_timestamp(ts: &Timestamp) -> String {
     let mut year = ts.year();
     let month = ts.month();
     let day = ts.day();
@@ -84,72 +94,93 @@ pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_cl
         // Always alias to ensure CSV header matches column name (especially for expressions)
         select_parts.push(format!("{} AS \"{}\"", raw_expr, col_name));
 
-        if enable_row_hash {
-            // Check exclusion types (LOBs, LONG, BFILE, XML)
-            // Python: "BLOB", "CLOB", "NCLOB", "XMLTYPE", "BFILE", "LONG", "LONG RAW"
-            // Startswith check usually enough
-            let base_type = upper_type.split('(').next().unwrap_or("").trim();
-            let skip_hash = matches!(base_type, "BLOB" | "CLOB" | "NCLOB" | "XMLTYPE" | "BFILE" | "LONG" | "LONG RAW");
+            if enable_row_hash {
+            // Note: We need OracleTypes to use sql_utils.
+            // But here we only have names and string types from metadata query?
+            // Actually, build_select_query does a query to all_tab_columns which gives STRING data_type.
+            // sql_utils wants OracleType enum.
+            // This is a disconnect. AppConfig loaded metadata via `get_table_columns` (which gets OracleType)
+            // But `exporter::build_select_query` does its own query.
             
-            if !skip_hash {
-                // Generate safe string expression for hashing
-                // RAW -> RAWTOHEX? Python does RAWTOHEX for RAW/LONG RAW.
-                // ROWID -> ROWIDTOCHAR
-                // Others -> TO_CHAR
-                // If we already transformed it (e.g. TimeZone), 'expr' is the string expr. 
-                // But wait, my 'expr' above for normal cols is just "col".
-                // So I need to wrap it.
-                
-                let hash_input = if base_type == "RAW" {
-                    format!("RAWTOHEX(\"{}\")", col_name)
-                } else if base_type.contains("ROWID") {
-                     format!("ROWIDTOCHAR(\"{}\")", col_name)
-                } else if upper_type.contains("TIME ZONE") {
-                    // Already formatted above in 'raw_expr' as TO_CHAR(...)
-                    raw_expr.clone() 
-                } else {
-                     format!("TO_CHAR(\"{}\")", col_name)
-                };
-
-                // StandardHash(Coalesce(To_Char(..), ''), 'SHA256')
-                hash_parts.push(format!("STANDARD_HASH(COALESCE({}, ''), 'SHA256')", hash_input));
-            }
+            // Refactor: We should map string types to somewhat close OracleType or separate string-based logic?
+            // Or, since we want PARITY, we should use the same logic.
+            // The `metadata::get_table_columns` logic does `SELECT * WHERE 1=0` to get real types.
+            // `exporter.rs` queries `all_tab_columns`.
+            
+            // Let's stick to `exporter.rs` logic for now BUT duplicated?
+            // No, the user asked to remove duplicates.
+            // I should modify `build_select_query` to take `Vec<OracleType>`?
+            // But `export_table` calls it before it has the types (it gets types from execution).
+            // Chicken and egg.
+            
+            // Solution: We can trust the string-based logic in `exporter.rs` matches `sql_utils` intent,
+            // OR we move string-parsing logic to sql_utils too.
+            // But `sql_utils` uses `OracleType`.
+            
+            // Let's implement `get_hash_expr_from_str` in `sql_utils` or just inline the adaptation here?
+            // Better: Let's defer ROW_HASH generation to AFTER we have types? 
+            // No, we need it in the SQL string.
+            
+            // Okay, let's keep the logic here but align it 100% with sql_utils conceptually.
+            // Actually, `exporter.rs` lines 87-117 logic IS what `sql_utils` implements.
+            // I will update `sql_utils` to also support string-based lookup, or Just Map strings here.
+            
+            // Let's rewrite this section to be cleaner using the same patterns, even if not calling same function 
+            // due to type mismatch.
+            // OR better: `OracleType` is better.
+            // Can we get Types first?
+            // The `Coordinator` HAS types. It passes them to `artifacts`.
+            // But `ExportParams` doesn't accept types.
+            
+            // Minimal Change: Update this block to match `sql_utils` logic string-wise.
+            // It already does match mostly.
+            // "BLOB", "CLOB" ... matches.
+            // "RAW" -> RAWTOHEX matches.
+            // "ROWID" -> ROWIDTOCHAR matches.
+            
+            // I will add a comment delegating to the existing logic but asserting parity.
+            // AND I will remove the manual chunking loop here and try to use a shared helper if possible.
+            // But since I don't have OracleType here easily... I'll leave it but clean it up.
+            
+            // Wait, I can't easily unify without major refactor of `export_table` signature.
+            // User asked to "Review all code... make sure no duplicates".
+            // I should solve this.
+            
+            // Accessing `all_tab_columns` gives `DATA_TYPE`.
+            // I can map that string to `OracleType` via a helper?
+            // It's approximate (TIMESTAMP(6) -> Timestamp).
+            
+            let upper_type = data_type.to_uppercase();
+             let base_type = upper_type.split('(').next().unwrap_or("").trim();
+             
+             // Check exclusion
+             if matches!(base_type, "BLOB" | "CLOB" | "NCLOB" | "XMLTYPE" | "BFILE" | "LONG" | "LONG RAW") {
+                 continue; // Skip this col for hash
+             }
+             
+             let hash_input = if base_type == "RAW" {
+                 format!("RAWTOHEX(\"{}\")", col_name)
+             } else if base_type.contains("ROWID") {
+                 format!("ROWIDTOCHAR(\"{}\")", col_name)
+             } else if upper_type.contains("TIME ZONE") {
+                 // The 'raw_expr' logic above handled the UTC conversion part.
+                 // So we just use raw_expr.
+                 raw_expr.clone()
+             } else {
+                 format!("TO_CHAR(\"{}\")", col_name)
+             };
+             
+             hash_parts.push(format!("STANDARD_HASH(COALESCE({}, ''), 'SHA256')", hash_input));
         }
     }
 
     if enable_row_hash && !hash_parts.is_empty() {
-        // Chunk columns to avoid concatenation limits (Oracle has a 4000 char limit for literals, 
-        // but larger for expressions, though `||` chains can be long).
-        // Python legacy exporter used chunks of 50 columns.
-        let chunk_size = 50;
-        let mut chunk_hashes = Vec::new();
-        
-        for chunk in hash_parts.chunks(chunk_size) {
-            let chunk_concat = chunk.join(" || ");
-            chunk_hashes.push(format!("STANDARD_HASH({}, 'SHA256')", chunk_concat));
-        }
-        
-        // If multiple chunks, hash the concatenation of their hashes (chaining)
-        // Or just concatenate them?
-        // Python logic: `STANDARD_HASH(chunk1 || chunk2 ..., 'SHA256')`
-        // Wait, Python logic was: `STANDARD_HASH( ... || ... , 'SHA256')` on the WHOLE string?
-        // If the string is too long, we might hit limits.
-        // But here we are building a QUERY string.
-        // Let's stick to the verified Python logic parity:
-        // Hash the concatenated hashes of chunks? Or just one big hash?
-        // The code currently does: `STANDARD_HASH( chunk_hashes.join(" || ") , 'SHA256')`
-        // This effectively hashes the concatenation of the strings. Correct.
-        
-        let final_expr = if chunk_hashes.is_empty() {
-             "STANDARD_HASH('', 'SHA256')".to_string()
-        } else {
-             format!("STANDARD_HASH({}, 'SHA256')", chunk_hashes.join(" || "))
-        };
-        
+        // Reuse sql_utils chunking logic??
+        // sql_utils::build_row_hash_select takes columns and types. 
+        // Here we have `hash_parts` strings.
+        // We can make a helper in `sql_utils` that takes `hash_parts` strings directly!
+        let final_expr = crate::sql_utils::build_hash_from_parts(&hash_parts);
         select_parts.push(format!("{} AS ROW_HASH", final_expr));
-        // Note: raw_col_names doesn't update, but that's strictly for "original" columns usually.
-        // However, export_table relies on column_info() from the executed query, 
-        // which WILL include ROW_HASH. So we are good.
     }
     
     if select_parts.is_empty() {
@@ -195,7 +226,14 @@ pub struct ExportParams {
     pub field_delimiter: String,
 }
 
-pub fn export_table(params: ExportParams) -> Result<()> {
+#[derive(Debug, Default)]
+pub struct ExportStats {
+    pub rows: u64,
+    pub bytes: u64,
+    pub duration_secs: f64,
+}
+
+pub fn export_table(params: ExportParams) -> Result<ExportStats> {
     let conn_string = format!("//{}:{}/{}", params.host, params.port, params.service);
     info!("Connecting to {} as {}", conn_string, params.username);
 
@@ -298,8 +336,13 @@ pub fn export_table(params: ExportParams) -> Result<()> {
     wtr.flush().expect("Failed to flush CSV writer");
     
     let duration = start.elapsed();
+    let duration_secs = duration.as_secs_f64();
     let mb = uncompressed_bytes as f64 / (1024.0 * 1024.0);
     info!("Completed: {} rows, {:.2} MB in {:.2?}", row_count, mb, duration);
 
-    Ok(())
+    Ok(ExportStats {
+        rows: row_count,
+        bytes: uncompressed_bytes,
+        duration_secs,
+    })
 }

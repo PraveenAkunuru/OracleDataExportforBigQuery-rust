@@ -1,0 +1,10 @@
+database:
+  username: "system"
+  password: "password"
+  host: "localhost"
+  port: 1521
+  service: "XE"
+export:
+  output_dir: "./negative_tests/output_zero_parallel"
+  table: "TEST_TABLE"
+  parallel: 0

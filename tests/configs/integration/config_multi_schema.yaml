@@ -1,0 +1,10 @@
+database:
+  username: "system"
+  password: "password"
+  host: "localhost"
+  port: 1521
+  service: "XE"
+export:
+  output_dir: "./output_multi"
+  schemas_file: "./schemas_test.txt"
+  cpu_percent: 50

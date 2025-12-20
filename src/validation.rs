@@ -1,9 +1,21 @@
+//! # Validation Module
+//!
+//! Performs "Tiered Validation" on tables before/after export to ensure data integrity.
+//!
+//! ## Tiers
+//! 1. **Row Count**: Basic check (COUNT(*)).
+//! 2. **Primary Key Hash**: `SUM(ORA_HASH(PK))` to detect missing/duplicate rows.
+//! 3. **Aggregates**: `SUM(NumericCol)` for up to 3 numeric columns to detect value corruption.
+//!
+//! Results are saved in `validation.json` and used to generate `validation.sql` for BigQuery.
+
 use oracle::{Connection, Result};
 use serde::Serialize;
 use log::{info, warn};
 
 
 #[derive(Serialize, Debug)]
+/// Container for all validation metrics found for a table
 pub struct ValidationStats {
     pub table_name: String,
     pub row_count: u64,
@@ -12,6 +24,7 @@ pub struct ValidationStats {
 }
 
 #[derive(Serialize, Debug)]
+/// Represents a single column aggregation result
 pub struct ColumnAggregate {
     pub column_name: String,
     pub agg_type: String, // SUM, MIN, MAX

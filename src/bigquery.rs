@@ -1,3 +1,13 @@
+//! # BigQuery Module
+//!
+//! Handles type mapping and schema generation for BigQuery.
+//!
+//! ## Mapping Strategy
+//! - `NUMBER(p,s)` -> `NUMERIC` or `BIGNUMERIC` depending on precision/scale.
+//! - `DATE` -> `DATETIME` (No time zone in Oracle DATE).
+//! - `TIMESTAMP` -> `DATETIME` (No time zone).
+//! - `TIMESTAMP WITH TIME ZONE` -> `TIMESTAMP` (UTC).
+
 use oracle::sql_type::OracleType;
 use serde::Serialize;
 use std::fs::File;
@@ -69,31 +79,48 @@ pub fn map_oracle_to_bq(oracle_type: &OracleType) -> String {
     }
 }
 
+// Replaces existing implementation
 pub fn map_oracle_to_bq_ddl(oracle_type: &OracleType) -> String {
     match oracle_type {
         OracleType::Number(prec, scale) => {
+             // Logic for INT64 vs NUMERIC vs BIGNUMERIC
+             // 1. If scale == 0:
+             //    prec <= 19 => INT64 (safe for 64-bit signed)
+             //    prec > 19  => NUMERIC (up to 38 digits) or BIGNUMERIC (>38)
+             //    Oracle MAX is 38. So usually NUMERIC is sufficient.
+             //    But sometimes NUMBER without args implies max.
+             
              if *scale == 0 {
                  if *prec > 19 { "NUMERIC".to_string() } else { "INT64".to_string() }
              } else {
-                 // Use precision/scale if available and valid
-                 // BQ NUMERIC supports max precision 38, scale 9.
-                 // BQ BIGNUMERIC supports max precision 76.76.
-                 // Oracle sometimes reports prec=0, scale=-127 for float.
+                 // scale != 0
+                 // BQ NUMERIC: max precision 38, max scale 9
+                 // Oracle NUMBER(p,s): p <= 38, s can be anything.
+                 // If s > 9, we MUST use BIGNUMERIC.
+                 // If p > 38, we MUST use BIGNUMERIC.
                  let p = *prec;
                  let s = *scale;
-                 if s > 0 && p > 0 {
-                      if p <= 38 && s <= 9 {
-                          format!("NUMERIC({}, {})", p, s)
-                      } else {
-                          // Allow BIGNUMERIC with params? BIGNUMERIC(P, S) is valid.
-                          format!("BIGNUMERIC({}, {})", p, s)
-                      }
+                 
+                 // Note: rust-oracle might return 0 for precision if unspecified?
+                 // If p=0 && s=-127 (float), we map to FLOAT usually, but if it fell through here?
+                 // (OracleType::Number handles it).
+                 
+                 if (s > 0 && s <= 9) && (p > 0 && p <= 38) {
+                      format!("NUMERIC({}, {})", p, s)
                  } else {
-                      if p > 38 { "BIGNUMERIC".to_string() } else { "NUMERIC".to_string() }
+                      // fallback to BIGNUMERIC for high precision/scale
+                      // We can default to just BIGNUMERIC without params to be safe,
+                      // or carry over params if valid?
+                      // BQ BIGNUMERIC(P, S) supports P<=76.76.
+                      if p > 0 && s > 0 {
+                          format!("BIGNUMERIC({}, {})", p, s)
+                      } else {
+                          "BIGNUMERIC".to_string()
+                      }
                  }
              }
         },
-        // Reuse JSON mapping for others, or specialize if needed
+        // Reuse string/json mapping for non-numeric types as they are usually same (STRING, BYTES, DATETIME, TIMESTAMP)
         t => map_oracle_to_bq(t), 
     }
 }

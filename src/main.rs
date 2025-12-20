@@ -1,3 +1,24 @@
+//! # Oracle Data Exporter for BigQuery (Rust)
+//!
+//! This is the main entry point for the application.
+//! It handles argument parsing, configuration loading, and mode selection (Coordinator vs Worker).
+//!
+//! ## Modes
+//! - **Coordinator Mode**: Activated via `--config` or when an output directory is specified.
+//!   Manages discovery, task planning, and worker thread orchestration.
+//! - **Ad-hoc Worker Mode**: Activated via `--table` and `--output` (file path).
+//!   Performs a direct single-threaded export of a specific table or chunk.
+//!
+//! ## Modules
+//! - `config`: Configuration structs and validation logic.
+//! - `coordinator`: Discovery and thread pool management.
+//! - `exporter`: Core Oracle-to-CSV export logic.
+//! - `metadata`: Database metadata queries (schema, size, chunks).
+//! - `validation`: Data validation logic (row counts, checksums).
+//! - `artifacts`: Generators for DDL, JSON schemas, and SQL scripts.
+//! - `sql_utils`: Centralized SQL generation utilities (hashing, parity).
+//! - `bigquery`: BigQuery type mapping and schema generation.
+
 // MODULES
 mod exporter;
 mod config;
@@ -6,6 +27,7 @@ mod coordinator;
 mod bigquery;
 mod validation;
 mod artifacts;
+mod sql_utils;
 
 use clap::Parser;
 use log::{info, error};
@@ -42,6 +64,11 @@ fn main() {
         };
         // Allow CLI override
         config.merge_cli(&args);
+        
+        if let Err(e) = config.validate() {
+            error!("Invalid configuration: {}", e);
+            process::exit(1);
+        }
         
         let coord = Coordinator::new(config);
         if let Err(e) = coord.run() {
@@ -128,6 +155,8 @@ fn main() {
                          enable_row_hash: None,
                          cpu_percent: None,
                          field_delimiter: None,
+                         schemas: None,
+                         schemas_file: None,
                      },
                      bigquery: None,
                  };

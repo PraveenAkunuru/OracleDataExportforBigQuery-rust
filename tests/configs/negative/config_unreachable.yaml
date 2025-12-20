@@ -1,0 +1,9 @@
+database:
+  username: "system"
+  password: "password"
+  host: "192.0.2.1"
+  port: 1521
+  service: "XE"
+export:
+  output_dir: "./negative_tests/output_unreachable"
+  table: "TEST_TABLE"

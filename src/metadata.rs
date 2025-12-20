@@ -1,8 +1,19 @@
+//! # Metadata Module
+//!
+//! Handles all queries related to database structure and statistics.
+//!
+//! ## Key Functions
+//! - `get_tables`: Lists tables in schema.
+//! - `get_table_size_gb`: Estimates size using `ALL_SEGMENTS` (fast) or `num_rows` (fallback).
+//! - `generate_chunks`: Uses `DBMS_PARALLEL_EXECUTE` to split tables by ROWID ranges.
+//! - `get_ddl`: Uses `DBMS_METADATA` to extract original CREATE TABLE statements.
+
 use oracle::{Connection, Result};
 use log::{info, warn, debug};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
+/// Basic table metadata summary
 pub struct TableMetadata {
     pub owner: String,
     pub table_name: String,
@@ -12,8 +23,10 @@ pub struct TableMetadata {
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// Represents a ROWID range for parallel processing
 pub struct Chunk {
     pub chunk_id: u32,
+    /// Oracle ROWID string (Base64-like)
     pub start_rowid: String,
     pub end_rowid: String,
 }
