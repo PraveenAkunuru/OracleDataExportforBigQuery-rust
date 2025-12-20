@@ -87,3 +87,35 @@ impl AppConfig {
         if let Some(o) = &args.output { self.export.output_dir = o.clone(); }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_load_yaml_config() {
+        let yaml = r#"
+database:
+  username: "test_user"
+  password: "test_password"
+  host: "localhost"
+  port: 1521
+  service: "ORCL"
+export:
+  output_dir: "./output"
+  table: "MY_TABLE"
+  enable_row_hash: true
+"#;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        write!(file, "{}", yaml).unwrap();
+        let path = file.path().to_str().unwrap();
+
+        let config = AppConfig::from_file(path).expect("Failed to parse config");
+        
+        assert_eq!(config.database.username, "test_user");
+        assert_eq!(config.database.port, 1521);
+        assert_eq!(config.export.table.as_deref(), Some("MY_TABLE"));
+        assert_eq!(config.export.enable_row_hash, Some(true));
+    }
+}

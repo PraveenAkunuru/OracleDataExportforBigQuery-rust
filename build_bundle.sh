@@ -62,7 +62,7 @@ docker run --rm \
 # 5. Assemble Bundle
 echo "-> Assembling Bundle..."
 cp target_centos7/release/oracle_rust_exporter "$DIST_DIR/"
-cp config.yaml "$DIST_DIR/config_template.yaml"
+cp config_full.yaml "$DIST_DIR/config_template.yaml"
 
 # Create run.sh wrapper
 cat > "$DIST_DIR/run.sh" << 'EOF'
