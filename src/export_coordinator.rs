@@ -32,6 +32,9 @@ pub struct ExportTask {
     pub chunk_id: Option<u32>,
     pub query_where: Option<String>,
     pub output_file: String,
+    pub enable_row_hash: bool,
+    pub use_client_hash: bool,
+    pub field_delimiter: String,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -606,6 +609,9 @@ schema_mapping:
                              chunk_id: Some(chunk.chunk_id),
                              query_where: Some(query_where),
                              output_file: filename,
+                             enable_row_hash: self.config.export.enable_row_hash.unwrap_or(false),
+                             use_client_hash: self.config.export.use_client_hash.unwrap_or(false),
+                             field_delimiter: self.config.export.field_delimiter.clone().unwrap_or("\u{0010}".to_string()),
                          })?;
                     }
                 },
@@ -636,6 +642,9 @@ schema_mapping:
                     chunk_id: None,
                     query_where: None,
                     output_file: filename,
+                    enable_row_hash: self.config.export.enable_row_hash.unwrap_or(false),
+                    use_client_hash: self.config.export.use_client_hash.unwrap_or(false),
+                    field_delimiter: self.config.export.field_delimiter.clone().unwrap_or("\u{0010}".to_string()),
                 })?;
             }
         }
@@ -657,8 +666,9 @@ schema_mapping:
             schema: task.schema.clone(),
             table: task.table.clone(),
             query_where: task.query_where.clone(),
-            enable_row_hash: config.export.enable_row_hash.unwrap_or(false),
-            field_delimiter: config.export.field_delimiter.clone().unwrap_or("\u{0010}".to_string()),
+            enable_row_hash: task.enable_row_hash,
+            use_client_hash: task.use_client_hash,
+            field_delimiter: task.field_delimiter.clone(),
         };
 
         let start = std::time::Instant::now();

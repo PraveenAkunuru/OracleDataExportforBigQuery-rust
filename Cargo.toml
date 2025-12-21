@@ -22,5 +22,7 @@ crossbeam-channel = "0.5"
 
 tonic = "0.12" 
 tempfile = "3.23.0"
+sha2 = "0.10.9"
+hex = "0.4.3"
 
 [dev-dependencies]

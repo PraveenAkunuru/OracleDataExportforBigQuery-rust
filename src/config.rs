@@ -61,8 +61,10 @@ pub struct ExportConfig {
     pub prefetch_rows: Option<u32>,
     /// Tables to exclude from export
     pub exclude_tables: Option<Vec<String>>,
-    /// Enable ROW_HASH calculation for parity/validation
+    /// If true, enables ROW_HASH generation
     pub enable_row_hash: Option<bool>,
+    /// If true, computes ROW_HASH in Rust client instead of Oracle
+    pub use_client_hash: Option<bool>,
     /// Target CPU usage percent for dynamic threading (default 50)
     pub cpu_percent: Option<u8>,
     /// Field delimiter for CSV (default Ctrl+P)

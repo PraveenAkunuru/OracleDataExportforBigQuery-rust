@@ -19,6 +19,8 @@ use log::{info, warn};
 use base64::{Engine as _, engine::general_purpose};
 use csv::{WriterBuilder, QuoteStyle};
 
+use sha2::{Sha256, Digest};
+
 /// Formats Oracle Timestamp to BigQuery-compliant string
 /// Format: `YYYY-MM-DD HH:MI:SS.FF6`
 pub fn format_timestamp(ts: &Timestamp) -> String {
@@ -40,27 +42,12 @@ pub fn format_timestamp(ts: &Timestamp) -> String {
 #[cfg(test)]
 mod tests {
     // use super::*; // Unused
-
-    #[test]
-    fn test_format_timestamp() {
-        // We can't easily construct oracle::sql_type::Timestamp directly if it doesn't have a public constructor.
-        // Checking docs... usually it does or we can mock it?
-        // If not, we might fail to compile this test if we can't create a Timestamp.
-        // A quick check suggests oracle::sql_type::Timestamp might be constructible via `Timestamp::new`? 
-        // If not, I'll have to skip this test or find another way.
-        // Let's assume for now we might skip if I can't verify compilation.
-        // Actually, let's verify if I can even run a test that constructs it.
-        // "oracle" crate docs: Timestamp::new(year, month, day, hour, min, sec, nsec, ...)
-        
-        // If I cannot verify, I will skip adding this specific test for now to avoid breaking build.
-        // Instead, I will write a test for Config since that uses standard structs.
-    }
 }
 
 use crate::oracle_metadata;
 
 /// Builds the SELECT query dynamically based on table metadata
-pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_clause: Option<&String>, enable_row_hash: bool) -> Result<(String, Vec<String>)> {
+pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_clause: Option<&String>, enable_row_hash: bool, use_client_hash: bool) -> Result<(String, Vec<String>)> {
     let mut stmt = conn.statement(oracle_metadata::SQL_GET_COLUMNS).build()?;
     let table_param: &dyn oracle::sql_type::ToSql = &table;
     let schema_param: &dyn oracle::sql_type::ToSql = &schema;
@@ -109,14 +96,14 @@ pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_cl
         // Always alias to ensure CSV header matches column name (especially for expressions)
         select_parts.push(format!("{} AS \"{}\"", raw_expr, col_name));
 
-        if enable_row_hash {
+        if enable_row_hash && !use_client_hash {
             if let Some(h) = crate::sql_generator_utils::get_hash_expr_from_str(&col_name, &data_type) {
                 hash_parts.push(h);
             }
         }
     }
 
-    if enable_row_hash && !hash_parts.is_empty() {
+    if enable_row_hash && !use_client_hash && !hash_parts.is_empty() {
         let final_expr = crate::sql_generator_utils::build_hash_from_parts(&hash_parts);
         select_parts.push(format!("{} AS ROW_HASH", final_expr));
     }
@@ -160,6 +147,8 @@ pub struct ExportParams {
     pub query_where: Option<String>,
     /// If true, computes SHA256(ROW) as extra column
     pub enable_row_hash: bool,
+    /// If true, computes ROW_HASH in Rust client instead of Oracle
+    pub use_client_hash: bool,
     /// CSV Field Delimiter (e.g. "\x10")
     pub field_delimiter: String,
 }
@@ -178,7 +167,7 @@ pub fn export_table(params: ExportParams) -> Result<ExportStats> {
     let conn = Connection::connect(&params.username, &params.password, &conn_string)?;
     
     // Build Query
-    let (sql, _) = build_select_query(&conn, &params.schema, &params.table, params.query_where.as_ref(), params.enable_row_hash)?;
+    let (sql, _) = build_select_query(&conn, &params.schema, &params.table, params.query_where.as_ref(), params.enable_row_hash, params.use_client_hash)?;
 
     // Prepare Statement
     let mut stmt = conn.statement(&sql)
@@ -204,9 +193,13 @@ pub fn export_table(params: ExportParams) -> Result<ExportStats> {
         .from_writer(encoder);
 
     let col_infos = rows.column_info();
-    let col_names: Vec<String> = col_infos.iter().map(|c| c.name().to_string()).collect();
+    let mut col_names: Vec<String> = col_infos.iter().map(|c| c.name().to_string()).collect();
     let col_types: Vec<OracleType> = col_infos.iter().map(|c| c.oracle_type().clone()).collect();
     
+    if params.enable_row_hash && params.use_client_hash {
+        col_names.push("ROW_HASH".to_string());
+    }
+
     wtr.write_record(&col_names).expect("Failed to write header");
 
     let mut row_count = 0;
@@ -263,6 +256,43 @@ pub fn export_table(params: ExportParams) -> Result<ExportStats> {
             record.push(val_str);
         }
         
+        // Client-Side Hashing
+        if params.enable_row_hash && params.use_client_hash {
+            let mut hasher = Sha256::new();
+            for (i, val) in record.iter().enumerate() {
+                // Determine if we should hash this column
+                // Logic mimics build_hash_from_parts: STANDARD_HASH(val)
+                // We hash the value. If it's NOT the first column, we first hash the previous accumulator (which is implicit in Sha256 state? No, Oracle does ||)
+                // Oracle: STANDARD_HASH( ... || STANDARD_HASH(col, 'SHA256'), 'SHA256')
+                // Actually, our SQL generator does: 
+                // STANDARD_HASH(STANDARD_HASH(c1) || STANDARD_HASH(c2) ..., 'SHA256')
+                
+                // So we must:
+                // 1. Hash the column value -> h_val
+                // 2. Append h_val to a master buffer
+                // 3. Hash the master buffer at the end
+                
+                let val_bytes = val.as_bytes();
+                let col_hash = if val.is_empty() {
+                    // Oracle STANDARD_HASH('') depends. 
+                    // SQL: STANDARD_HASH(COALESCE(TO_CHAR(col), ''), 'SHA256')
+                    // SHA256('') = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+                    let mut h = Sha256::new();
+                    h.update(b"");
+                    hex::encode_upper(h.finalize())
+                } else {
+                    let mut h = Sha256::new();
+                    h.update(val_bytes);
+                    hex::encode_upper(h.finalize())
+                };
+
+                // Update master hasher with this column's hash
+                hasher.update(col_hash.as_bytes());
+            }
+            let final_hash = hex::encode_upper(hasher.finalize());
+            record.push(final_hash);
+        }
+
         uncompressed_bytes += 1; 
         wtr.write_record(&record).expect("Failed to write record");
         row_count += 1;
