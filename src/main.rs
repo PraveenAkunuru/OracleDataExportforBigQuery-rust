@@ -29,8 +29,11 @@ mod data_validator;
 mod artifact_generator;
 mod sql_generator_utils;
 pub mod bigquery_ingestion;
+pub mod gcp;
 
 use clap::Parser;
+// ... (lines omitted)
+
 use log::{info, error};
 use std::process;
 use crate::config::{AppConfig, CliArgs};
@@ -117,6 +120,7 @@ fn main() {
                      table: table_only,
                      query_where: args.query_where.clone(),
                      enable_row_hash: false,
+                     use_client_hash: false,
                      field_delimiter: "\u{0010}".to_string(),
                  };
                  
@@ -161,8 +165,10 @@ fn main() {
                          tables: None,
                           tables_file: None,
                           load_to_bq: Some(args.load),
+                          use_client_hash: None,
                      },
                      bigquery: None,
+                     gcp: None,
                  };
                  
                  let coord = Coordinator::new(config);

@@ -23,6 +23,17 @@ pub struct AppConfig {
     pub export: ExportConfig,
     /// BigQuery settings (Optional, mostly for schema gen)
     pub bigquery: Option<BigQueryConfig>,
+    /// GCP settings for Translation API
+    pub gcp: Option<GcpConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct GcpConfig {
+    pub project_id: String,
+    pub location: String,
+    pub gcs_bucket: String,
+    /// If true, enforces strict decimal precision in BQ translation
+    pub decimal_precision_strictness: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -50,8 +61,10 @@ pub struct ExportConfig {
     pub prefetch_rows: Option<u32>,
     /// Tables to exclude from export
     pub exclude_tables: Option<Vec<String>>,
-    /// Enable ROW_HASH calculation for parity/validation
+    /// If true, enables ROW_HASH generation
     pub enable_row_hash: Option<bool>,
+    /// If true, computes ROW_HASH in Rust client instead of Oracle
+    pub use_client_hash: Option<bool>,
     /// Target CPU usage percent for dynamic threading (default 50)
     pub cpu_percent: Option<u8>,
     /// Field delimiter for CSV (default Ctrl+P)
@@ -209,6 +222,7 @@ export:
                 schemas: None, schemas_file: None, tables: None, tables_file: None, load_to_bq: None,
             },
             bigquery: None,
+            gcp: None,
         };
 
         let args = CliArgs {

@@ -1,39 +1,98 @@
 # Oracle Data Exporter for BigQuery (Rust)
 
-A high-performance, production-ready tool to export Oracle database tables to BigQuery-compliant CSV files. This application is written in Rust for speed, reliability, and minimal resource usage, serving as a drop-in replacement for the legacy Python exporter.
+I built this tool to solving a specific problem: moving massive Oracle tables to BigQuery was too slow and fragile with existing Python scripts. This is a complete rewrite in Rust, designed for raw speed, stability, and correctness.
 
-## Key Features
--   **High Performance**: ~30x faster than legacy Python implementation.
--   **Parity**: Full feature parity (ROW_HASH, Schema Generation, Validation).
--   **Zero-Install**: Deploys as a self-contained portable bundle (no Docker required on backend).
--   **Configurable**: Dynamic parallelism, custom delimiters, and resource throttling.
+## Why use this?
 
-## Documentation
--   **[Walkthrough & Usage](docs/WALKTHROUGH.md)**: Detailed configuration guide and data type mappings.
--   **[Deployment Strategy](docs/DEPLOYMENT.md)**: Instructions for building the portable production bundle.
--   **[Maintenance](docs/MAINTENANCE.md)**: Tips for restarting, troubleshooting, and verifying exports.
+*   **Speed**: It’s multi-threaded and asynchronous. On my benchmarks, it handles ~40-60 MB/s per node (depending on network), which is about 30x faster than the legacy single-threaded Python exporter.
+*   **Correctness**: It doesn't just dump data. It handles weird Oracle types (`TIMESTAMP WITH TIME ZONE`, `INTERVAL`, `XMLTYPE`) and maps them correctly to BigQuery standards.
+*   **Safety**: It supports "Client-Side Hashing" (calculating SHA256 in Rust) so you can verify data integrity without burning CPU cycles on your production Oracle database.
+*   **Zero-Dependency**: The binary stands alone. You don't need to install Python, pip, or hunt down dependencies on your servers. Just drop the binary and the Oracle Instant Client libraries.
 
-## Quick Start (Docker)
+## Prerequisites
+
+You just need two things:
+1.  **Oracle Instant Client**: The proprietary Oracle libraries (`libclntsh.so`).
+2.  **Environment**: Linux (RHEL/CentOS/Debian) is the primary target.
+
+## Building
+
+If you want to build it yourself:
+
 ```bash
-# Build
-docker build -t oracle_rust_exporter .
-
-# Run
-docker run --rm --network host \
-  -v $(pwd)/config.yaml:/app/config.yaml \
-  -v $(pwd)/output:/app/output \
-  oracle_rust_exporter --config /app/config.yaml
+cargo build --release
 ```
 
-## Production Build
-To create the portable Linux bundle for RHEL 7/8 environments:
+To create a deployable bundle (zip file) with all the scripts and libs included:
+
 ```bash
 ./build_bundle.sh
 ```
-*(Requires Oracle Instant Client ZIP, see [Deployment Strategy](docs/DEPLOYMENT.md))*
 
-### Runtime Requirements
-The application uses **Oracle Instant Client**. You must set `LD_LIBRARY_PATH` to the location of `libclntsh.so` (usually the `lib/` directory in the bundle).
+## How to Run
+
+There are two ways to use this.
+
+### 1. The "Just Export One Table" Mode
+
+Great for ad-hoc dumps or testing.
+
 ```bash
-export LD_LIBRARY_PATH=$(pwd)/lib:$LD_LIBRARY_PATH
+# Point to your Instant Client first!
+export LD_LIBRARY_PATH=/opt/oracle/instantclient:$LD_LIBRARY_PATH
+
+./oracle_rust_exporter \
+  --host 10.0.0.5 \
+  --service ORCL \
+  --username SCOTT \
+  --password tiger \
+  --table EMP \
+  --output ./emp.csv.gz
 ```
+
+### 2. Coordinator Mode (Production)
+
+This is what you should use for actual migrations. It reads a config file, discovers metadata, splits large tables into chunks (automatically!), and can even generate the BigQuery table schemas for you.
+
+```bash
+./oracle_rust_exporter --config config.yaml
+```
+
+**Minimal `config.yaml`:**
+
+```yaml
+database:
+  username: "SCOTT"
+  password: "tiger"
+  host: "10.0.0.5"
+  port: 1521
+  service: "ORCL"
+
+export:
+  output_dir: "./data_dump"
+  schemas: ["SCOTT"]       # Schemas to scan
+  parallel: 8              # Threads to use
+  use_client_hash: true    # Enable the fast Rust-side hashing
+```
+
+## What you get
+
+After running the coordinator, you'll see a structure like this:
+
+```
+data_dump/
+  SCOTT/
+    EMP/
+      data/
+        data_chunk_0.csv.gz
+        data_chunk_1.csv.gz
+      config/
+        bigquery_schema.json    # Ready for 'bq load'
+        oracle_ddl.sql          # In case you need the source DDL
+        load_command.sh         # A helper script to load this into BQ
+```
+
+## Tuning Tips
+
+*   **`parallel`**: Start with 4 or 8. If your network is fast, you can push this higher, but watch your DB load.
+*   **`use_client_hash`**: Always keep this `true` for large tables. It offloads the expensive SHA256 calculation to the exporter (Rust), saving your Oracle DB from CPU spikes.

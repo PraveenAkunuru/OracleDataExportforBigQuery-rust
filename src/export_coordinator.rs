@@ -32,6 +32,9 @@ pub struct ExportTask {
     pub chunk_id: Option<u32>,
     pub query_where: Option<String>,
     pub output_file: String,
+    pub enable_row_hash: bool,
+    pub use_client_hash: bool,
+    pub field_delimiter: String,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -450,6 +453,13 @@ impl Coordinator {
             .map(|(n, _)| n.clone())
             .collect();
 
+        // Fetch Partition Keys and Indexes for DDL generation
+                    let partition_cols = oracle_metadata::get_partition_keys(conn, schema, table).unwrap_or_else(|e| {
+                        warn!("Failed to get partition keys for {}: {}", table, e);
+                        Vec::new()
+                    });
+                    let index_cols = oracle_metadata::get_index_columns(conn, schema, table).unwrap_or_default();
+
         match crate::data_validator::validate_table(conn, schema, table, pk_cols.as_deref(), Some(&agg_cols)) {
             Ok(stats) => {
                 let duration = start_time.elapsed().as_secs_f64();
@@ -470,20 +480,117 @@ impl Coordinator {
                     self.config.export.enable_row_hash.unwrap_or(false),
                     self.config.export.field_delimiter.as_deref().unwrap_or("\u{0010}"),
                     project,
-                    dataset
+                    dataset,
+                    pk_cols.as_deref(),
+                    &partition_cols,
+                    &index_cols,
+                    self.config.gcp.as_ref().map(|g| g.gcs_bucket.as_str()),
                 ) {
                     warn!("Failed to save artifacts for {}.{}: {}", schema, table, e);
                 } else {
                     info!("Artifacts generated in {}", config_dir);
+                }
+
+                if let Some(gcp_config) = &self.config.gcp {
+                    if let Some(ddl) = &oracle_ddl {
+                         // Use 'input' and 'output' subdirectories to keep things clean and ensure config is found.
+                         let base_gcs_path = format!("gs://{}/{}/{}", gcp_config.gcs_bucket, schema, table);
+                         let gcs_input_dir = format!("{}/input", base_gcs_path);
+                         let gcs_output_dir = format!("{}/output", base_gcs_path);
+                         
+                         let input_ddl_uri = format!("{}/oracle_ddl.sql", gcs_input_dir);
+
+                         info!("Initiating GCP Translation for {}.{}", schema, table);
+                         
+                         // Upload Translation Config if enabled
+                         if let Some(strict) = gcp_config.decimal_precision_strictness {
+                             if strict {
+                                 let config_content = "
+schema_mapping:
+  decimal_precision_strictness: MAX
+"; 
+                                 let config_uri = format!("{}/translation_config.yaml", gcs_input_dir);
+                                 if let Err(e) = crate::gcp::storage::upload_file_cli(&config_uri, config_content.to_string()) {
+                                     warn!("Failed to upload translation config: {}", e);
+                                 }
+                             }
+                         }
+
+                         match crate::gcp::storage::upload_file_cli(&input_ddl_uri, ddl.clone()) {
+                             Ok(_) => {
+                                 // Pass the DIRECTORY as source, so it finds both .sql and .yaml
+                                 match crate::gcp::translator::translate_ddl_cli(
+                                     &gcp_config.project_id,
+                                     &gcp_config.location,
+                                     &gcs_input_dir,
+                                     &gcs_output_dir
+                                 ) {
+                                     Ok(output_path) => {
+                                         info!("Translation submitted. Result output at: {}", output_path);
+                                         
+                                         // Attempt to find and download translated DDL
+                                         // The output directory might contain multiple files. We look for .sql files.
+                                         match crate::gcp::storage::list_files_cli(&output_path) {
+                                             Ok(files) => {
+                                                 let sql_files: Vec<&String> = files.iter()
+                                                     .filter(|f| f.ends_with(".sql") && !f.ends_with("oracle_ddl.sql")) 
+                                                     .collect();
+                                                 
+                                                 if let Some(translated_sql_uri) = sql_files.first() {
+                                                     info!("Found translated SQL: {}", translated_sql_uri);
+                                                     match crate::gcp::storage::download_file_cli(translated_sql_uri) {
+                                                         Ok(sql_content) => {
+                                                             let translated_ddl_path = format!("{}/bigquery_translated.ddl", config_dir);
+                                                             if let Err(e) = std::fs::write(&translated_ddl_path, &sql_content) {
+                                                                 warn!("Failed to write translated DDL to {}: {}", translated_ddl_path, e);
+                                                             } else {
+                                                                 info!("Saved translated DDL to {}", translated_ddl_path);
+                                                                 // Validation: Compare with generated bigquery.ddl
+                                                                 let bq_ddl_path = format!("{}/bigquery.ddl", config_dir);
+                                                                 match std::fs::read_to_string(&bq_ddl_path) {
+                                                                     Ok(generated_ddl) => {
+                                                                         if generated_ddl.trim() != sql_content.trim() {
+                                                                             warn!("VALIDATION WARNING: Translated DDL differs from generated DDL for {}.{}", schema, table);
+                                                                             // We could add more diff details here if needed
+                                                                         } else {
+                                                                             info!("VALIDATION SUCCESS: Translated DDL matches generated DDL for {}.{}", schema, table);
+                                                                         }
+                                                                     },
+                                                                     Err(e) => warn!("Could not read generated DDL for comparison: {}", e)
+                                                                 }
+                                                             }
+                                                         },
+                                                         Err(e) => warn!("Failed to download translated DDL: {}", e)
+                                                     }
+                                                 } else {
+                                                     warn!("No translated .sql files found in output. Translation might have failed or produced no output.");
+                                                     // Optional: Check for report to debug
+                                                     if let Some(report) = files.iter().find(|f| f.ends_with("batch_translation_report.csv")) {
+                                                          info!("Translation report found at: {}", report);
+                                                     }
+                                                 }
+                                             },
+                                             Err(e) => warn!("Failed to list translation output: {}", e)
+                                         }
+                                     },
+                                     Err(e) => warn!("Translation failed for {}.{}: {}", schema, table, e)
+                                 }
+                             },
+                             Err(e) => warn!("Failed to upload DDL to GCS for {}.{}: {}", schema, table, e)
+                         }
+                    }
                 }
             },
             Err(e) => warn!("Validation failed for {}.{}: {}", schema, table, e),
         }
 
         // Planning
-        if size_gb > 1.0 { // Threshold 1GB
-            let chunk_count = (size_gb / 1.0).ceil() as u32;
-            info!("Splitting {} into {} chunks", table, chunk_count);
+        let concurrency = self.calculate_concurrency() as u32;
+        
+        if size_gb > 0.5 { // Threshold 0.5GB to allow chunking for semi-large tables
+            let size_chunks = (size_gb / 0.5).ceil() as u32; // 500MB chunks
+            let chunk_count = std::cmp::max(concurrency, size_chunks);
+            info!("Splitting {} into {} chunks (Size: ~{:.2} GB, Concurrency: {})", table, chunk_count, size_gb, concurrency);
             match oracle_metadata::generate_chunks(conn, schema, table, chunk_count) {
                 Ok(chunks) => {
                     for chunk in chunks {
@@ -502,6 +609,9 @@ impl Coordinator {
                              chunk_id: Some(chunk.chunk_id),
                              query_where: Some(query_where),
                              output_file: filename,
+                             enable_row_hash: self.config.export.enable_row_hash.unwrap_or(false),
+                             use_client_hash: self.config.export.use_client_hash.unwrap_or(false),
+                             field_delimiter: self.config.export.field_delimiter.clone().unwrap_or("\u{0010}".to_string()),
                          })?;
                     }
                 },
@@ -532,6 +642,9 @@ impl Coordinator {
                     chunk_id: None,
                     query_where: None,
                     output_file: filename,
+                    enable_row_hash: self.config.export.enable_row_hash.unwrap_or(false),
+                    use_client_hash: self.config.export.use_client_hash.unwrap_or(false),
+                    field_delimiter: self.config.export.field_delimiter.clone().unwrap_or("\u{0010}".to_string()),
                 })?;
             }
         }
@@ -553,8 +666,9 @@ impl Coordinator {
             schema: task.schema.clone(),
             table: task.table.clone(),
             query_where: task.query_where.clone(),
-            enable_row_hash: config.export.enable_row_hash.unwrap_or(false),
-            field_delimiter: config.export.field_delimiter.clone().unwrap_or("\u{0010}".to_string()),
+            enable_row_hash: task.enable_row_hash,
+            use_client_hash: task.use_client_hash,
+            field_delimiter: task.field_delimiter.clone(),
         };
 
         let start = std::time::Instant::now();
@@ -617,6 +731,7 @@ mod tests {
                 load_to_bq: None,
             },
             bigquery: None,
+            gcp: None,
         }
     }
 

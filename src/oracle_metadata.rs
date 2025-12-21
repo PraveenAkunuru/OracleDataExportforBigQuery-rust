@@ -35,6 +35,21 @@ pub const SQL_GET_COLUMNS: &str = "
       AND owner = :2 
     ORDER BY column_id
 ";
+const SQL_GET_PARTITION_KEYS: &str = "
+    SELECT column_name
+    FROM all_part_key_columns
+    WHERE owner = :1 
+      AND name = :2 
+      AND object_type = 'TABLE'
+    ORDER BY column_position
+";
+const SQL_GET_INDEXES: &str = "
+    SELECT column_name
+    FROM all_ind_columns
+    WHERE table_owner = :1
+      AND table_name = :2
+    ORDER BY index_name, column_position
+";
 
 #[derive(Debug, Clone, Serialize)]
 /// Basic table metadata summary
@@ -250,4 +265,28 @@ pub fn get_primary_key(conn: &Connection, schema: &str, table: &str) -> Result<O
     } else {
         Ok(Some(cols))
     }
+}
+
+/// Fetches Partition Key columns
+pub fn get_partition_keys(conn: &Connection, schema: &str, table: &str) -> Result<Vec<String>> {
+    let rows = conn.query(SQL_GET_PARTITION_KEYS, &[&schema.to_uppercase(), &table.to_uppercase()])?;
+    let mut cols = Vec::new();
+    for row_result in rows {
+        let row = row_result?;
+        let col: String = row.get(0)?;
+        cols.push(col);
+    }
+    Ok(cols)
+}
+
+/// Fetches all columns involved in indexes
+pub fn get_index_columns(conn: &Connection, schema: &str, table: &str) -> Result<Vec<String>> {
+    let rows = conn.query(SQL_GET_INDEXES, &[&schema.to_uppercase(), &table.to_uppercase()])?;
+    let mut cols = Vec::new();
+    for row_result in rows {
+        let row = row_result?;
+        let col: String = row.get(0)?;
+        cols.push(col);
+    }
+    Ok(cols)
 }
