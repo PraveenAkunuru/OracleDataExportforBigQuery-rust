@@ -1,6 +1,6 @@
 use std::process::Command;
 use std::error::Error;
-use log::{info, warn};
+use log::info;
 use std::io::Write;
 use tempfile::NamedTempFile;
 

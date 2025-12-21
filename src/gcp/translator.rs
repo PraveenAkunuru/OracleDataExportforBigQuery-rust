@@ -1,6 +1,6 @@
 use std::process::Command;
 use std::error::Error;
-use log::{info, error, warn};
+use log::info;
 use serde_json::Value;
 
 /// Gets a GCP Access Token using `gcloud auth print-access-token`

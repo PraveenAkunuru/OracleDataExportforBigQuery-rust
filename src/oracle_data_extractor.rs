@@ -259,7 +259,7 @@ pub fn export_table(params: ExportParams) -> Result<ExportStats> {
         // Client-Side Hashing
         if params.enable_row_hash && params.use_client_hash {
             let mut hasher = Sha256::new();
-            for (i, val) in record.iter().enumerate() {
+            for (_i, val) in record.iter().enumerate() {
                 // Determine if we should hash this column
                 // Logic mimics build_hash_from_parts: STANDARD_HASH(val)
                 // We hash the value. If it's NOT the first column, we first hash the previous accumulator (which is implicit in Sha256 state? No, Oracle does ||)
