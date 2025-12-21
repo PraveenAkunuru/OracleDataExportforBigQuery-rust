@@ -582,9 +582,12 @@ schema_mapping:
         }
 
         // Planning
-        if size_gb > 1.0 { // Threshold 1GB
-            let chunk_count = (size_gb / 1.0).ceil() as u32;
-            info!("Splitting {} into {} chunks", table, chunk_count);
+        let concurrency = self.calculate_concurrency() as u32;
+        
+        if size_gb > 0.5 { // Threshold 0.5GB to allow chunking for semi-large tables
+            let size_chunks = (size_gb / 0.5).ceil() as u32; // 500MB chunks
+            let chunk_count = std::cmp::max(concurrency, size_chunks);
+            info!("Splitting {} into {} chunks (Size: ~{:.2} GB, Concurrency: {})", table, chunk_count, size_gb, concurrency);
             match oracle_metadata::generate_chunks(conn, schema, table, chunk_count) {
                 Ok(chunks) => {
                     for chunk in chunks {
