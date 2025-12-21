@@ -1,67 +1,52 @@
-# Restart Guide: Oracle Rust Exporter
-**Date**: 2025-12-19
-**Status**: Feature Complete (Rust Parity with Python)
+# Operational Handbook
 
-## 1. Project Context (Memory Aid)
-We are migrating an Oracle-to-BigQuery exporter from **Python** to **Rust**.
-The Rust version (`oracle_rust_exporter`) is now **Feature Complete**, matching or exceeding the Python legacy version.
+This guide covers how to keep the exporter running smoothly, handle failures, and verify your data.
 
-### Key Achievements (Last Session)
--   **Parity Achieved**:
-    -   **Row Hash**: Rust now generates `ROW_HASH` (SHA256) in CSVs (matching Python).
-    -   **Validation**: Generated `validation.sql` now includes **Column Sums** and **Row Counts**.
-    -   **Documentation**: Automatically generates `column_mapping.md`.
-    -   **Format**: Standardized CSV quoting (`NonNumeric`) and XML newline stripping.
--   **Performance**: Rust is ~34x faster per core.
+## 1. Architecture Overview (Mental Model)
 
-## 2. How to Run (Reference)
+*   **Coordinator**: The "Brain". It connects to Oracle, queries `ALL_TABLES`, and plans the work. If a table is >1GB, it splits it into chunks.
+*   **Workers**: The "Muscle". They take a task (Table + Chunk range), execute the SQL, and stream the result to Gzipped CSVs.
+*   **Validation**: Runs *after* export. It queries Oracle for `COUNT(*)` and column sums, and compares them to the exported file stats.
 
-### A. Rust Application (Recommended)
-The Rust application is containerized. To run it:
+## 2. Resuming Interrupted Exports
 
-1.  **Navigate to Directory**:
-    ```bash
-    cd oracle_rust_exporter
-    ```
-2.  **Build Image**:
-    ```bash
-    docker build -t oracle_rust_exporter .
-    ```
-3.  **Run (Coordinator Mode)**:
-    ```bash
-    # Ensure config_full.yaml and output directory exist
-    mkdir -p export_data_full
-    chmod 777 export_data_full
-    
-    docker run --rm --network host \
-      -v $(pwd)/config_full.yaml:/app/config.yaml \
-      -v $(pwd)/export_data_full:/app/export_data_full \
-      oracle_rust_exporter --config /app/config.yaml
-    ```
-    *Note: `config_full.yaml` is currently configured with `enable_row_hash: true`.*
+I built the coordinator to be idempotent. If the process crashes or you kill it:
 
-### B. Python Application (Legacy)
-The legacy Python application requires the virtual environment.
+1.  **Fix the issue** (e.g., free up disk space).
+2.  **Re-run the same command**: `./run.sh --config config.yaml`.
 
-1.  **Navigate to Root**:
-    ```bash
-    cd /usr/local/google/home/pakunuru/OracleDataExportForBigQuery
-    ```
-2.  **Activate Virtual Environment**:
-    ```bash
-    source .venv/bin/activate
-    ```
-3.  **Run**:
-    ```bash
-    python3 main.py --config config.yaml
-    ```
+The coordinator checks if `data_chunk_X.csv.gz` exists.
+*   **Exists**: SKIPPED (It assumes the chunk is done).
+*   **Missing**: STARTED.
 
-## 3. Next Steps (To-Do)
-1.  **Deployment**: Implement the "Portable Bundle" build script (targeting CentOS 7) as per `deployment_strategy.md`.
-2.  **Code Archive**: Decide when to archive the Python code (`src/*.py`).
-3.  **Cleanup**: Remove temporary export directories (`export_data_full`, etc.) when verified.
+**Force Restart**: If you suspect a file is corrupt, delete the specific `TABLE_NAME` folder (or just the `.csv.gz` files) and re-run.
 
-## 4. Troubleshooting
--   **Permissions**: Docker writes as `root` (or app user). Use `sudo` or Docker to clean up output directories:
-    `docker run --rm -v $(pwd):/work alpine rm -rf /work/export_data_full`
--   **Database Access**: Both apps use `network host` or direct connection strings. Ensure VPN/Tunnel is active if connecting to remote DB.
+## 3. Data Verification
+
+Every export generates a `metadata.json` and a `validation.sql` in the `config/` subfolder.
+
+### How to Verify
+1.  **Quick Check**: Look at `summary_report.json` in the root of the export. It lists every table and whether it SUCCEEDED or FAILED.
+2.  **Deep Dive**:
+    *   Open `export_data/SCHEMA/TABLE/config/metadata.json`.
+    *   Compare `oracle_row_count` vs `exported_row_count`.
+3.  **BigQuery Check**:
+    Run the queries found in `validation.sql` inside the BigQuery console after loading. It checks for:
+    *   Row Count Exact Match.
+    *   Numeric Column Sum Matches (to catch precision loss).
+
+## 4. Tuning Performance
+
+*   **CPU usage**: By default, I cap usage at 50% of cores. You can increase this by setting `cpu_percent: 80` in `config.yaml`.
+*   **Hashing**: `use_client_hash: true` is faster but uses more client CPU. `enable_row_hash: false` is the fastest if you don't need the checksums.
+*   **Network**: The exporter is usually network-bound. If throughput is low, check your distance to the DB.
+
+## 5. Troubleshooting Common Errors
+
+### "DPI-1047: Cannot locate Oracle Client library"
+*   **Cause**: The application can't find `libclntsh.so`.
+*   **Fix**: Always use `./run.sh`. It sets `LD_LIBRARY_PATH`. Do not run the binary directly unless you set that var yourself.
+
+### "ORA-12514: TNS:listener does not currently know of service"
+*   **Cause**: Wrong `service` name in `config.yaml`.
+*   **Fix**: Check `lsnrctl status` on the DB server to get the exact Service Name (PDB Name).
