@@ -1,0 +1,14 @@
+database:
+  username: "TESTUSER"
+  password: "testpassword"
+  host: "localhost"
+  port: 1521
+  service: "FREEPDB1"
+
+export:
+  output_dir: "./golden_path_output"
+  schemas: ["TESTUSER"]
+  parallel: 8
+  use_client_hash: true
+  enable_row_hash: true
+  field_delimiter: ","

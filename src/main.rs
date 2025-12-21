@@ -109,9 +109,11 @@ fn main() {
                  };
                  
                  let params = ExportParams {
-                     host: args.host.as_ref().unwrap().clone(),
-                     port: args.port.unwrap_or(1521),
-                     service: args.service.as_ref().unwrap().clone(),
+                     connection_string: format!("//{}:{}/{}", 
+                        args.host.as_ref().unwrap(), 
+                        args.port.unwrap_or(1521), 
+                        args.service.as_ref().unwrap()
+                     ),
                      username: args.username.as_ref().unwrap().clone(),
                      password,
                      output_file: output.clone(),
@@ -148,7 +150,9 @@ fn main() {
                          password: Some(password),
                          host: args.host.as_ref().unwrap().clone(),
                          port: args.port.unwrap_or(1521),
+
                          service: args.service.as_ref().unwrap_or(&"FREEPDB1".to_string()).clone(),
+                         connection_string: None,
                      },
                      export: crate::config::ExportConfig {
                          output_dir: output.clone(),
@@ -166,6 +170,8 @@ fn main() {
                           tables_file: None,
                           load_to_bq: Some(args.load),
                           use_client_hash: None,
+                          adaptive_parallelism: None,
+                          target_throughput_per_core: None,
                      },
                      bigquery: None,
                      gcp: None,

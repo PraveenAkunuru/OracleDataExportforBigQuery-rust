@@ -920,6 +920,7 @@ dependencies = [
  "log",
  "num_cpus",
  "oracle",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",

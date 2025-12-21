@@ -14,7 +14,7 @@ pub fn upload_file_cli(gcs_path: &str, content: String) -> Result<(), Box<dyn Er
     
     // Try 'gcloud storage' first, simpler if available
     let status = Command::new("gcloud")
-        .args(&["storage", "cp", temp_path, gcs_path])
+        .args(["storage", "cp", temp_path, gcs_path])
         .status();
 
     match status {
@@ -32,7 +32,7 @@ pub fn download_file_cli(gcs_path: &str) -> Result<String, Box<dyn Error>> {
     info!("Downloading translated DDL from {}", gcs_path);
     
     let output = Command::new("gcloud")
-        .args(&["storage", "cat", gcs_path])
+        .args(["storage", "cat", gcs_path])
         .output()?;
         
     if !output.status.success() {
@@ -46,7 +46,7 @@ pub fn download_file_cli(gcs_path: &str) -> Result<String, Box<dyn Error>> {
 /// Lists files in a GCS path using `gcloud storage ls`
 pub fn list_files_cli(gcs_path: &str) -> Result<Vec<String>, Box<dyn Error>> {
     let output = Command::new("gcloud")
-        .args(&["storage", "ls", gcs_path])
+        .args(["storage", "ls", gcs_path])
         .output()?;
         
     if !output.status.success() {

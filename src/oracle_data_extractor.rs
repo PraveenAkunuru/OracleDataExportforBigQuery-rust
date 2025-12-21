@@ -90,6 +90,11 @@ pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_cl
              format!("REPLACE(REPLACE(JSON_SERIALIZE(\"{}\"), CHR(10), ''), CHR(13), '')", col_name)
         } else if upper_type == "BOOLEAN" {
              format!("CASE WHEN \"{}\" THEN 'true' ELSE 'false' END", col_name)
+        } else if upper_type.contains("SDO_GEOMETRY") {
+             // Convert Spatial to WKT (Well Known Text) for universal compatibility
+             format!("SDO_UTIL.TO_WKTGEOMETRY(\"{}\")", col_name)
+        } else if upper_type.contains("UROWID") {
+             format!("TO_CHAR(\"{}\")", col_name)
         } else {
              format!("\"{}\"", col_name)
         };
@@ -125,12 +130,8 @@ pub fn build_select_query(conn: &Connection, schema: &str, table: &str, where_cl
 
 /// Parameters for a single table export job
 pub struct ExportParams {
-    /// Database Host
-    pub host: String,
-    /// Database Port (default 1521)
-    pub port: u16,
-    /// Oracle Service Name (PDB)
-    pub service: String,
+    /// Full Oracle Connection String (e.g. //host:port/service)
+    pub connection_string: String,
     /// Database Username
     pub username: String,
     /// Database Password
@@ -161,10 +162,9 @@ pub struct ExportStats {
 }
 
 pub fn export_table(params: ExportParams) -> Result<ExportStats> {
-    let conn_string = format!("//{}:{}/{}", params.host, params.port, params.service);
-    info!("Connecting to {} as {}", conn_string, params.username);
+    info!("Connecting to {} as {}", params.connection_string, params.username);
 
-    let conn = Connection::connect(&params.username, &params.password, &conn_string)?;
+    let conn = Connection::connect(&params.username, &params.password, &params.connection_string)?;
     
     // Build Query
     let (sql, _) = build_select_query(&conn, &params.schema, &params.table, params.query_where.as_ref(), params.enable_row_hash, params.use_client_hash)?;
@@ -234,7 +234,7 @@ pub fn export_table(params: ExportParams) -> Result<ExportStats> {
                 OracleType::Xml => {
                     let val: Option<String> = row.get(i).unwrap_or(None);
                     match val {
-                        Some(s) => s.replace('\n', " ").replace('\r', " "),
+                        Some(s) => s.replace(['\n', '\r'], " "),
                         None => String::new(),
                     }
                 },
@@ -259,7 +259,7 @@ pub fn export_table(params: ExportParams) -> Result<ExportStats> {
         // Client-Side Hashing
         if params.enable_row_hash && params.use_client_hash {
             let mut hasher = Sha256::new();
-            for (_i, val) in record.iter().enumerate() {
+            for val in record.iter() {
                 // Determine if we should hash this column
                 // Logic mimics build_hash_from_parts: STANDARD_HASH(val)
                 // We hash the value. If it's NOT the first column, we first hash the previous accumulator (which is implicit in Sha256 state? No, Oracle does ||)

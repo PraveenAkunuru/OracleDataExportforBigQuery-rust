@@ -44,6 +44,18 @@ pub struct DatabaseConfig {
     pub host: String,
     pub port: u16,
     pub service: String,
+    /// Optional full connection string (TNS or Easy Connect) that overrides host/port/service
+    pub connection_string: Option<String>,
+}
+
+impl DatabaseConfig {
+    pub fn get_connection_string(&self) -> String {
+        if let Some(cs) = &self.connection_string {
+            cs.clone()
+        } else {
+            format!("//{}:{}/{}", self.host, self.port, self.service)
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -79,6 +91,10 @@ pub struct ExportConfig {
     pub tables_file: Option<String>,
     /// Automatically load data to BigQuery after export (explicit option)
     pub load_to_bq: Option<bool>,
+    /// Enable adaptive parallelism (Elastic Worker Pool)
+    pub adaptive_parallelism: Option<bool>,
+    /// Target MB/s per core for adaptive logic (default 12.0)
+    pub target_throughput_per_core: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -214,12 +230,14 @@ export:
     fn test_merge_cli_overrides() {
         let mut config = AppConfig {
             database: DatabaseConfig {
-                username: "u".into(), password: None, host: "h".into(), port: 1521, service: "s".into()
+                username: "u".into(), password: None, host: "h".into(), port: 1521, service: "s".into(),
+                connection_string: None,
             },
             export: ExportConfig {
                 output_dir: ".".into(), schema: None, table: None, parallel: Some(4), prefetch_rows: None,
                 exclude_tables: None, enable_row_hash: None, cpu_percent: Some(20), field_delimiter: None,
                 schemas: None, schemas_file: None, tables: None, tables_file: None, load_to_bq: None,
+                use_client_hash: None, adaptive_parallelism: None, target_throughput_per_core: None,
             },
             bigquery: None,
             gcp: None,

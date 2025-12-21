@@ -17,7 +17,7 @@ use log::{info, error, warn};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use crossbeam_channel::{unbounded, Sender, Receiver};
-use num_cpus;
+
 use oracle::Connection;
 use serde::Serialize;
 use std::fs::File;
@@ -50,6 +50,16 @@ pub struct TaskResult {
     pub error: Option<String>,
     pub chunk_id: Option<u32>,
     pub completed_at: String,
+}
+
+struct PlanningContext<'a> {
+    pub conn: &'a Connection,
+    pub schema: &'a str,
+    pub table: &'a str,
+    pub out_dir: &'a str,
+    pub tx: &'a Sender<ExportTask>,
+    pub results: &'a Arc<Mutex<Vec<TaskResult>>>,
+    pub db_cpus: Option<usize>,
 }
 
 impl TaskResult {
@@ -173,8 +183,20 @@ impl Coordinator {
 
     pub fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
         let start_time = std::time::Instant::now();
-        let max_threads = self.calculate_concurrency();
-        info!("Coordinator starting with {} worker threads (80% CPU rule)", max_threads);
+        
+        // Connect momentarily to check DB CPUs
+        let db_cpus = {
+             let db = &self.config.database;
+             let conn_string = db.get_connection_string();
+             if let Ok(conn) = Connection::connect(&db.username, db.password.as_deref().unwrap_or(""), &conn_string) {
+                 oracle_metadata::get_db_cpu_count(&conn).unwrap_or(None)
+             } else {
+                 None
+             }
+        };
+
+        let max_threads = self.calculate_concurrency(db_cpus);
+        info!("Coordinator starting with {} worker threads", max_threads);
 
         let (tx, rx): (Sender<ExportTask>, Receiver<ExportTask>) = unbounded();
         
@@ -183,7 +205,7 @@ impl Coordinator {
 
         // 1. Discover Work
         info!("Step 1: Discovering tables and planning tasks...");
-        self.discover_and_plan_tasks(tx, results.clone())?;
+        self.discover_and_plan_tasks(tx, results.clone(), db_cpus)?;
         info!("Step 1: Planning completed.");
 
         // 2. Spawn Workers
@@ -275,30 +297,41 @@ impl Coordinator {
         Ok(())
     }
 
-    fn calculate_concurrency(&self) -> usize {
+    fn calculate_concurrency(&self, db_cpus: Option<usize>) -> usize {
         if let Some(p) = self.config.export.parallel {
+            info!("Concurrency Loop: User forced {} threads", p);
             return p;
         }
 
-        let cpus = num_cpus::get();
+        let local_cpus = num_cpus::get();
         let pct = self.config.export.cpu_percent.unwrap_or(50);
         
-        // If user explicitly set cpu_percent, we trust them up to 100%. 
-        // Otherwise default is 50%.
-        // We cap at 32 threads to avoid diminishing returns/context switching on massive machines 
-        // unless explicitly overridden by 'parallel'.
+        // Oracle Constraint
+        let effective_limit = if let Some(oracle_cpus) = db_cpus {
+             info!("Oracle CPU Check: Found {} CPUs on DB Server.", oracle_cpus);
+             // We shouldn't exceed local capacity OR Oracle capacity significantly
+             // Rule: Min(local, oracle * 2) - maybe allow 2x oracle if we are just pulling?
+             // Actually user said: "Parallelism now needs to be decided with both ... Default to 50% of core capacity."
+             // Assuming "core capacity" means the bottleneck (min of both).
+             std::cmp::min(local_cpus, oracle_cpus)
+        } else {
+             local_cpus
+        };
+
+        // Default 50%, Max 80% (if user didn't override)
+        // If user set pct, use it on effective_limit
+        let target_usage = (effective_limit as f64 * (pct as f64 / 100.0)).ceil() as usize;
+        let final_target = std::cmp::max(2, target_usage); // Min 2 threads
         
-        let target_usage = (cpus as f64 * (pct as f64 / 100.0)).ceil() as usize;
-        let final_target = std::cmp::max(1, target_usage);
-        
-        info!("Dynamic Concurrency: {} CPUs available. Target usage {}%. Threads: {}", cpus, pct, final_target);
+        info!("Adaptive Concurrency: Local CPUs={}, Oracle CPUs={:?}, Target Usage={}%. Final Threads={}", 
+              local_cpus, db_cpus, pct, final_target);
         
         final_target
     }
 
-    fn discover_and_plan_tasks(&self, tx: Sender<ExportTask>, results: Arc<Mutex<Vec<TaskResult>>>) -> Result<(), Box<dyn std::error::Error>> {
+    fn discover_and_plan_tasks(&self, tx: Sender<ExportTask>, results: Arc<Mutex<Vec<TaskResult>>>, db_cpus: Option<usize>) -> Result<(), Box<dyn std::error::Error>> {
         let db = &self.config.database;
-        let conn_string = format!("//{}:{}/{}", db.host, db.port, db.service);
+        let conn_string = db.get_connection_string();
         let conn = Connection::connect(&db.username, db.password.as_deref().unwrap_or(""), &conn_string)?;
         
         let tasks = self.process_table_discovery(&conn, &results);
@@ -312,11 +345,20 @@ impl Coordinator {
 
         for (schema_name, table) in tasks {
             // Use schema_name variable consistently
-            if let Err(e) = self.plan_table_export(&conn, &schema_name, &table, out_dir, &tx, &results) {
+            if let Err(e) = self.plan_table_export(PlanningContext {
+                conn: &conn,
+                schema: &schema_name,
+                table: &table,
+                out_dir,
+                tx: &tx,
+                results: &results,
+                db_cpus
+            }) {
                  warn!("Failed to plan export for {}.{}: {}", schema_name, table, e);
                  // We don't stop everything for one table failure, plan_table_export records the failure in results
             }
         }
+
 
         Ok(())
     }
@@ -365,15 +407,19 @@ impl Coordinator {
     }
 
     /// Helper to plan a single table export: validation, artifacts, and chunking/task creation
+    /// Helper struct to reduce arguments for planning
     fn plan_table_export(
         &self, 
-        conn: &Connection, 
-        schema: &str, 
-        table: &str, 
-        out_dir: &str, 
-        tx: &Sender<ExportTask>, 
-        results: &Arc<Mutex<Vec<TaskResult>>>
+        ctx: PlanningContext
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let table = ctx.table;
+        let schema = ctx.schema;
+        let conn = ctx.conn;
+        let out_dir = ctx.out_dir;
+        let tx = ctx.tx;
+        let results = ctx.results;
+        let db_cpus = ctx.db_cpus;
+
         // Exclude check
         if let Some(excludes) = &self.config.export.exclude_tables {
             if excludes.iter().any(|x| x.eq_ignore_ascii_case(table)) {
@@ -406,7 +452,7 @@ impl Coordinator {
         std::fs::create_dir_all(&data_dir)?;
         std::fs::create_dir_all(&config_dir)?;
 
-        let (names, types, raw_strings) = match oracle_metadata::get_table_columns(conn, schema, table) {
+        let oracle_metadata::TableColumns { names, types, raw_types: raw_strings, comments: col_comments } = match oracle_metadata::get_table_columns(conn, schema, table) {
             Ok(res) => res,
             Err(e) => {
                 warn!("Failed to get columns for {}.{}: {}", schema, table, e);
@@ -421,6 +467,10 @@ impl Coordinator {
                 return Ok(());
             }
         };
+
+        // Fetch Virtual Columns
+        let virtual_cols_map = oracle_metadata::get_virtual_columns_map(conn, schema, table);
+
 
         // Artifacts & Validation
         let start_time = std::time::Instant::now();
@@ -443,7 +493,7 @@ impl Coordinator {
 
         let schema_path = format!("{}/schema.json", config_dir);
         let enable_row_hash = self.config.export.enable_row_hash.unwrap_or(false);
-        if let Err(e) = crate::bigquery_schema_mapper::generate_schema(&names, &types, &raw_strings, &schema_path, enable_row_hash) {
+        if let Err(e) = crate::bigquery_schema_mapper::generate_schema(&names, &types, &raw_strings, &col_comments, &schema_path, enable_row_hash) {
             warn!("Failed to generate BigQuery schema for {}.{}: {}", schema, table, e);
         }
 
@@ -468,23 +518,27 @@ impl Coordinator {
                 let dataset = self.config.bigquery.as_ref().map(|bq| bq.dataset.as_str()).unwrap_or(schema);
 
                 if let Err(e) = crate::artifact_generator::save_all_artifacts(
-                    config_path,
-                    schema,
-                    table,
-                    &names,
-                    &types,
-                    &raw_strings,
-                    &stats,
-                    oracle_ddl.as_deref(),
-                    duration,
-                    self.config.export.enable_row_hash.unwrap_or(false),
-                    self.config.export.field_delimiter.as_deref().unwrap_or("\u{0010}"),
-                    project,
-                    dataset,
-                    pk_cols.as_deref(),
-                    &partition_cols,
-                    &index_cols,
-                    self.config.gcp.as_ref().map(|g| g.gcs_bucket.as_str()),
+                    crate::artifact_generator::ArtifactParams {
+                        config_dir: config_path,
+                        schema,
+                        table,
+                        columns: &names,
+                        col_types: &types,
+                        raw_types: &raw_strings,
+                        col_comments: &col_comments,
+                        virtual_cols_map: &virtual_cols_map,
+                        stats: &stats,
+                        oracle_ddl: oracle_ddl.as_deref(),
+                        duration_secs: duration,
+                        enable_row_hash: self.config.export.enable_row_hash.unwrap_or(false),
+                        field_delimiter: self.config.export.field_delimiter.as_deref().unwrap_or("\u{0010}"),
+                        project,
+                        dataset,
+                        pk_cols: pk_cols.as_deref(),
+                        partition_cols: &partition_cols,
+                        index_cols: &index_cols,
+                        gcs_bucket: self.config.gcp.as_ref().map(|g| g.gcs_bucket.as_str()),
+                    }
                 ) {
                     warn!("Failed to save artifacts for {}.{}: {}", schema, table, e);
                 } else {
@@ -585,7 +639,7 @@ schema_mapping:
         }
 
         // Planning
-        let concurrency = self.calculate_concurrency() as u32;
+        let concurrency = self.calculate_concurrency(db_cpus) as u32;
         
         if size_gb > 0.5 { // Threshold 0.5GB to allow chunking for semi-large tables
             let size_chunks = (size_gb / 0.5).ceil() as u32; // 500MB chunks
@@ -656,9 +710,7 @@ schema_mapping:
     fn execute_task(config: &AppConfig, task: &ExportTask) -> TaskResult {
         let db = &config.database;
         let params = ExportParams {
-            host: db.host.clone(),
-            port: db.port,
-            service: db.service.clone(),
+            connection_string: db.get_connection_string(),
             username: db.username.clone(),
             password: db.password.as_deref().unwrap_or("").to_string(),
             output_file: task.output_file.clone(),
@@ -713,6 +765,7 @@ mod tests {
                 host: "localhost".to_string(),
                 port: 1521,
                 service: "XE".to_string(),
+                connection_string: None,
             },
             export: ExportConfig {
                 output_dir: ".".to_string(),
@@ -729,6 +782,9 @@ mod tests {
                 tables: None,
                 tables_file: None,
                 load_to_bq: None,
+                use_client_hash: None,
+                adaptive_parallelism: None,
+                target_throughput_per_core: None,
             },
             bigquery: None,
             gcp: None,

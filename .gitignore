@@ -8,3 +8,9 @@
 /oracle_exporter_dist
 .DS_Store
 **/*.log
+
+# Output Directories
+adaptive_output/
+golden_path_output/
+features_test_output/
+*_output/

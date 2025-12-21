@@ -21,16 +21,22 @@ pub struct BigQueryField {
     pub description: Option<String>,
 }
 
-pub fn generate_schema(col_names: &[String], col_types: &[OracleType], raw_types: &[String], output_path: &str, enable_row_hash: bool) -> std::io::Result<()> {
+pub fn generate_schema(col_names: &[String], col_types: &[OracleType], raw_types: &[String], col_comments: &[Option<String>], output_path: &str, enable_row_hash: bool) -> std::io::Result<()> {
     let mut fields = Vec::new();
     
     for i in 0..col_names.len() {
         let bq_type = map_oracle_to_bq(&col_types[i], Some(&raw_types[i]));
-        fields.push(serde_json::json!({
+        let mut field = serde_json::json!({
             "name": col_names[i],
             "type": bq_type,
             "mode": "NULLABLE"
-        }));
+        });
+
+        if let Some(Some(comment)) = col_comments.get(i) {
+            field["description"] = serde_json::json!(comment);
+        }
+
+        fields.push(field);
     }
     
     if enable_row_hash {
@@ -56,6 +62,8 @@ pub fn map_oracle_to_bq(oracle_type: &OracleType, raw_type: Option<&str>) -> Str
         if upper.contains("XMLTYPE") { return "STRING".to_string(); }
         if upper.contains("JSON") { return "JSON".to_string(); }
         if upper.contains("BOOLEAN") { return "BOOL".to_string(); }
+        if upper.contains("SDO_GEOMETRY") { return "STRING".to_string(); } // WKT
+        if upper.contains("UROWID") { return "STRING".to_string(); }
     }
 
     // 2. Fallback to OracleType variant matching

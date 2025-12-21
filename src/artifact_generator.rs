@@ -23,81 +23,123 @@ use crate::data_validator::ValidationStats;
 use crate::bigquery_schema_mapper;
 
 /// Generates and saves all auxiliary artifacts to the `config` directory.
-pub fn save_all_artifacts(
-    config_dir: &Path,
-    schema: &str,
-    table: &str,
-    columns: &[String],
-    col_types: &[OracleType],
-    raw_types: &[String],
-    stats: &ValidationStats,
-    oracle_ddl: Option<&str>,
-    duration_secs: f64,
-    enable_row_hash: bool,
-    field_delimiter: &str,
-    project: &str,
-    dataset: &str,
-    pk_cols: Option<&[String]>,
-    partition_cols: &[String],
-    index_cols: &[String],
-    gcs_bucket: Option<&str>,
-) -> std::io::Result<()> {
+/// Parameters for artifact generation
+pub struct ArtifactParams<'a> {
+    pub config_dir: &'a Path,
+    pub schema: &'a str,
+    pub table: &'a str,
+    pub columns: &'a [String],
+    pub col_types: &'a [OracleType],
+    pub raw_types: &'a [String],
+    pub col_comments: &'a [Option<String>],
+    pub virtual_cols_map: &'a std::collections::HashMap<String, String>,
+    pub stats: &'a ValidationStats,
+    pub oracle_ddl: Option<&'a str>,
+    pub duration_secs: f64,
+    pub enable_row_hash: bool,
+    pub field_delimiter: &'a str,
+    pub project: &'a str,
+    pub dataset: &'a str,
+    pub pk_cols: Option<&'a [String]>,
+    pub partition_cols: &'a [String],
+    pub index_cols: &'a [String],
+    pub gcs_bucket: Option<&'a str>,
+}
+
+/// Generates and saves all auxiliary artifacts to the `config` directory.
+pub fn save_all_artifacts(params: ArtifactParams) -> std::io::Result<()> {
     // 1. Generate BigQuery DDL
-    let bq_ddl = generate_bigquery_ddl(project, dataset, table, columns, col_types, raw_types, enable_row_hash, pk_cols, partition_cols, index_cols);
-    write_file(config_dir.join("bigquery.ddl"), &bq_ddl)?;
+    let bq_ddl = generate_bigquery_ddl(&params);
+    write_file(params.config_dir.join("bigquery.ddl"), &bq_ddl)?;
 
     // 1b. Generate BigQuery Schema JSON
-    let schema_path = config_dir.join("schema.json");
-    if let Err(e) = crate::bigquery_schema_mapper::generate_schema(columns, col_types, raw_types, schema_path.to_str().unwrap(), enable_row_hash) {
+    let schema_path = params.config_dir.join("schema.json");
+    if let Err(e) = crate::bigquery_schema_mapper::generate_schema(
+        params.columns, 
+        params.col_types, 
+        params.raw_types, 
+        params.col_comments,
+        schema_path.to_str().unwrap(), 
+        params.enable_row_hash
+    ) {
         warn!("Failed to generate schema.json: {}", e);
     }
     
     // 1c. Generate Column Mapping Doc (Parity)
-    let mapping_doc = generate_column_mapping_doc(schema, table, columns, col_types, raw_types, enable_row_hash);
-    write_file(config_dir.join("column_mapping.md"), &mapping_doc)?;
+    let mapping_doc = generate_column_mapping_doc(
+        params.schema, 
+        params.table, 
+        params.columns, 
+        params.col_types, 
+        params.raw_types, 
+        params.enable_row_hash
+    );
+    write_file(params.config_dir.join("column_mapping.md"), &mapping_doc)?;
 
     // 2. Save Oracle DDL
-    let oracle_ddl_content = oracle_ddl.unwrap_or("-- No Oracle DDL available");
-    write_file(config_dir.join("oracle.ddl"), oracle_ddl_content)?;
+    let oracle_ddl_content = params.oracle_ddl.unwrap_or("-- No Oracle DDL available");
+    write_file(params.config_dir.join("oracle.ddl"), oracle_ddl_content)?;
 
     // 3. Generate Load Command (shell script)
-    let load_cmd = generate_load_command(project, dataset, table, field_delimiter, gcs_bucket);
-    write_file(config_dir.join("load_command.sh"), &load_cmd)?;
-    // Make executable? In Docker/Linux, we can try, but std::fs::set_permissions is unix specific.
+    // If Virtual Columns OR Spatial Columns exist, the CSV data matches the PHYSICAL table.
+    let has_spatial = params.raw_types.iter().any(|t| t.to_uppercase().contains("SDO_GEOMETRY"));
+    let load_table_name = if !params.virtual_cols_map.is_empty() || has_spatial {
+        format!("{}_PHYSICAL", params.table)
+    } else {
+        params.table.to_string()
+    };
+
+    let load_cmd = generate_load_command(
+        params.project, 
+        params.dataset, 
+        &load_table_name, 
+        params.field_delimiter, 
+        params.gcs_bucket
+    );
+    write_file(params.config_dir.join("load_command.sh"), &load_cmd)?;
+    // Make executable
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let p = config_dir.join("load_command.sh");
+        let p = params.config_dir.join("load_command.sh");
         if let Ok(f) = File::open(&p) {
              let _ = f.set_permissions(std::fs::Permissions::from_mode(0o755));
         }
     }
 
     // 4. Generate Validation SQL
-    let val_sql = generate_validation_sql(project, dataset, table, stats);
-    write_file(config_dir.join("validation.sql"), &val_sql)?;
+    let val_sql = generate_validation_sql(params.project, params.dataset, params.table, params.stats);
+    write_file(params.config_dir.join("validation.sql"), &val_sql)?;
 
     // 5. Generate Reference Export SQL
-    let export_sql = generate_export_sql(schema, table, columns, col_types, raw_types, enable_row_hash, field_delimiter);
-    write_file(config_dir.join("export.sql"), &export_sql)?;
+    let export_sql = generate_export_sql(
+        params.schema, 
+        params.table, 
+        params.columns, 
+        params.col_types, 
+        params.raw_types, 
+        params.enable_row_hash, 
+        params.field_delimiter
+    );
+    write_file(params.config_dir.join("export.sql"), &export_sql)?;
 
     // 6. Generate Metadata JSON (Expanded)
     let metadata = json!({
-        "table_name": table,
-        "schema_name": schema,
-        "full_name": format!("{}.{}", schema, table),
+        "table_name": params.table,
+        "schema_name": params.schema,
+        "full_name": format!("{}.{}", params.schema, params.table),
         "export_timestamp": chrono::Utc::now().to_rfc3339(),
-        "validation": stats,
-        "export_duration_seconds": duration_secs,
-        "columns": generate_column_metadata(columns, col_types, raw_types, enable_row_hash),
+        "validation": params.stats,
+        "export_duration_seconds": params.duration_secs,
+        "columns": generate_column_metadata(params.columns, params.col_types, params.raw_types, params.col_comments, params.enable_row_hash),
         "oracle_ddl_file": "oracle.ddl",
         "bigquery_ddl_file": "bigquery.ddl"
     });
-    let metadata_path = config_dir.join("metadata.json");
+    let metadata_path = params.config_dir.join("metadata.json");
     let f = File::create(metadata_path)?;
     serde_json::to_writer_pretty(f, &metadata)?;
 
-    info!("Saved all artifacts to {:?}", config_dir);
+    info!("Saved all artifacts to {:?}", params.config_dir);
     Ok(())
 }
 
@@ -107,69 +149,99 @@ fn write_file(path: PathBuf, content: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn generate_bigquery_ddl(
-    project: &str, 
-    dataset: &str, 
-    table: &str, 
-    columns: &[String], 
-    col_types: &[OracleType], 
-    raw_strings: &[String], 
-    enable_row_hash: bool,
-    pk_cols: Option<&[String]>,
-    partition_cols: &[String],
-    index_cols: &[String]
-) -> String {
+fn generate_bigquery_ddl(params: &ArtifactParams) -> String {
+    let project = params.project;
+    let dataset = params.dataset;
+    let table = params.table;
+    let columns = params.columns;
+    let col_types = params.col_types;
+    let raw_strings = params.raw_types;
+    let col_comments = params.col_comments;
+    let virtual_cols_map = params.virtual_cols_map;
+    let enable_row_hash = params.enable_row_hash;
+    let pk_cols = params.pk_cols;
+    let partition_cols = params.partition_cols;
+    let index_cols = params.index_cols;
     let mut lines = Vec::new();
-    lines.push(format!("CREATE OR REPLACE TABLE `{}.{}.{}` (", project, dataset, table));
     
-    // Column Definitions
-    for (i, ((name, otype), rtype)) in columns.iter().zip(col_types.iter()).zip(raw_strings.iter()).enumerate() {
+    // --- 1. Physical Table DDL (Excluding Virtual Columns) ---
+    // Virtual columns in BigQuery are best handled as Views or Computed Columns (limited support).
+    // Given the request to "Create DDL + View", we will create the backing table with only stored columns.
+
+    let physical_table_name = format!("{}_PHYSICAL", table);
+    let full_physical_name = format!("`{}.{}.{}`", project, dataset, physical_table_name);
+    
+    lines.push("-- 1. Physical Table (Stored Data)".to_string());
+    lines.push(format!("CREATE OR REPLACE TABLE {} (", full_physical_name));
+    
+    let mut stored_cols_indices = Vec::new();
+
+    // Identify Stored Columns
+    for (i, name) in columns.iter().enumerate() {
+        if !virtual_cols_map.contains_key(&name.to_uppercase()) {
+            stored_cols_indices.push(i);
+        }
+    }
+
+    // Column Definitions (Stored Only)
+    for (idx, &opt_i) in stored_cols_indices.iter().enumerate() {
+        let name = &columns[opt_i];
+        let otype = &col_types[opt_i];
+        let rtype = &raw_strings[opt_i];
         let bq_type = bigquery_schema_mapper::map_oracle_to_bq_ddl(otype, Some(rtype));
-        let comma = if i < columns.len() - 1 || enable_row_hash || pk_cols.is_some() { "," } else { "" };
-        lines.push(format!("  {} {}{}", name, bq_type, comma));
+        
+        // Handle Options (Description)
+        let options_clause = if let Some(Some(comment)) = col_comments.get(opt_i) {
+             let escaped = comment.replace("\"", "\\\"");
+             format!(" OPTIONS(description=\"{}\")", escaped)
+        } else {
+             String::new()
+        };
+
+        let comma = if idx < stored_cols_indices.len() - 1 || enable_row_hash || pk_cols.is_some() { "," } else { "" };
+        lines.push(format!("  {} {}{}{}", name, bq_type, options_clause, comma));
     }
     
     if enable_row_hash {
         let comma = if pk_cols.is_some() { "," } else { "" };
-        lines.push(format!("  ROW_HASH STRING NOT NULL{}", comma));
+        lines.push(format!("  ROW_HASH STRING NOT NULL OPTIONS(description=\"SHA256 hash for duplicate detection\"){}", comma));
     }
 
-    // Primary Key (Not Enforced)
+    // Primary Key (Not Enforced) - Only include if all PK cols are physical (usually true)
     if let Some(pks) = pk_cols {
-        let pk_list = pks.join(", ");
-        lines.push(format!("  PRIMARY KEY ({}) NOT ENFORCED", pk_list));
+        // Filter PKs to ensure they exist in physical table
+        let physical_pks: Vec<&String> = pks.iter().filter(|pk| !virtual_cols_map.contains_key(&pk.to_uppercase())).collect();
+        if !physical_pks.is_empty() {
+             let pk_list = physical_pks.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(", ");
+             lines.push(format!("  PRIMARY KEY ({}) NOT ENFORCED", pk_list));
+        }
     }
     
     lines.push(")".to_string());
 
-    // Partitioning & Clustering Logic
+    // Partitioning & Clustering Logic (For Physical Table)
     let mut partition_by_clause = None;
     let mut cluster_candidates = Vec::new();
 
     // 1. Identify Partition Column
-    // BQ supports only ONE partition column (usually). We pick the first valid one.
-    // If it's a STRING, we treat it as a candidate for Clustering instead.
     for p_col in partition_cols {
-        // Find type
         if let Some(pos) = columns.iter().position(|c| c.eq_ignore_ascii_case(p_col)) {
+             // Only if physical
+             if virtual_cols_map.contains_key(&columns[pos].to_uppercase()) { continue; }
+
              let otype = &col_types[pos];
              let rtype = &raw_strings[pos];
              let bq_type = bigquery_schema_mapper::map_oracle_to_bq_ddl(otype, Some(rtype));
              
-             // Check compatibility
              if bq_type.starts_with("TIMESTAMP") || bq_type.starts_with("DATE") || bq_type.starts_with("DATETIME") {
                  if partition_by_clause.is_none() {
                      partition_by_clause = Some(format!("PARTITION BY {}", p_col));
                  }
              } else if bq_type.starts_with("INT") || bq_type.starts_with("INTEGER") || bq_type.contains("NUMERIC") || bq_type.contains("DECIMAL") {
-                 // Integer Range Partitioning
-                 // We use a safe default range. In production, users should adjust this.
                  if partition_by_clause.is_none() {
-                     // Default: 0 to 1M with step 1000 (1000 partitions)
                      partition_by_clause = Some(format!("PARTITION BY RANGE_BUCKET({}, GENERATE_ARRAY(0, 1000000, 1000))", p_col));
                  }
              } else {
-                 // Strings etc -> Clustering
                  cluster_candidates.push(p_col.clone());
              }
         }
@@ -180,13 +252,14 @@ fn generate_bigquery_ddl(
     }
 
     // 2. Build Clustering Keys
-    // Order: PKs -> Indexes -> (Partition Keys that were demoted)
     let mut final_cluster_keys = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    // Add PKs
     if let Some(pks) = pk_cols {
         for pk in pks {
+            // Only physical
+            if virtual_cols_map.contains_key(&pk.to_uppercase()) { continue; }
+
             if !seen.contains(pk) {
                 final_cluster_keys.push(pk.clone());
                 seen.insert(pk.clone());
@@ -194,15 +267,14 @@ fn generate_bigquery_ddl(
         }
     }
 
-    // Add Indexes
     for idx in index_cols {
+         if virtual_cols_map.contains_key(&idx.to_uppercase()) { continue; }
          if !seen.contains(idx) {
              final_cluster_keys.push(idx.clone());
              seen.insert(idx.clone());
          }
     }
 
-    // Add Demoted Partition Keys
     for p in cluster_candidates {
         if !seen.contains(&p) {
             final_cluster_keys.push(p.clone());
@@ -210,7 +282,6 @@ fn generate_bigquery_ddl(
         }
     }
 
-    // BQ Cap: 4 columns
     if !final_cluster_keys.is_empty() {
         let count = std::cmp::min(4, final_cluster_keys.len());
         let cluster_str = final_cluster_keys[0..count].join(", ");
@@ -218,6 +289,49 @@ fn generate_bigquery_ddl(
     }
 
     lines.push(";".to_string());
+    lines.push("".to_string());
+    
+    // --- 2. Logical View DDL (Including Virtual Columns) ---
+    // This view restores the original table interface
+    let full_view_name = format!("`{}.{}.{}`", project, dataset, table);
+    lines.push("-- 2. Logical View (Virtual Columns Restored)".to_string());
+    lines.push(format!("CREATE OR REPLACE VIEW {} AS SELECT", full_view_name));
+    
+    for (i, name) in columns.iter().enumerate() {
+        let select_expr = if let Some(expr) = virtual_cols_map.get(&name.to_uppercase()) {
+            // Translate Oracle Expressions to BigQuery
+            // 1. Handle TO_CHAR(x) -> CAST(x AS STRING)
+            let re = regex::Regex::new(r"TO_CHAR\(([^)]+)\)").unwrap();
+            let translated = re.replace_all(expr, "CAST($1 AS STRING)").to_string();
+            
+            // 2. Handle identifier quoting: Oracle "ID" -> BQ `ID`
+            let translated = translated.replace("\"", "`"); 
+
+            format!("  /* Virtual: {} */ {} AS {},", expr, translated, name)
+        } else {
+             // Check if it's SDO_GEOMETRY using raw_strings
+             if raw_strings[i].to_uppercase().contains("SDO_GEOMETRY") {
+                 format!("  SAFE.ST_GEOGFROMTEXT({}) AS {},", name, name)
+             } else {
+                 format!("  {},", name)
+             }
+        };
+        lines.push(select_expr);
+    }
+    
+    if enable_row_hash {
+        lines.push("  ROW_HASH".to_string());
+    } else {
+        // Remove trailing comma from last item if no row has
+        if let Some(last) = lines.last_mut() {
+            if last.ends_with(",") {
+                last.pop(); 
+            }
+        }
+    }
+    
+    lines.push(format!("FROM {};", full_physical_name));
+
     lines.join("\n")
 }
 
@@ -394,15 +508,19 @@ SPOOL OFF
 "#, delimiter, schema, table, cols, schema, table)
 }
 
-fn generate_column_metadata(columns: &[String], col_types: &[OracleType], raw_types: &[String], enable_row_hash: bool) -> serde_json::Value {
+fn generate_column_metadata(columns: &[String], col_types: &[OracleType], raw_types: &[String], col_comments: &[Option<String>], enable_row_hash: bool) -> serde_json::Value {
     let mut cols = Vec::new();
     for (i, (name, otype)) in columns.iter().zip(col_types.iter()).enumerate() {
-        cols.push(json!({
+        let mut obj = json!({
             "name": name,
-            "oracle_type": format!("{:?}", otype), // Debug representation
+            "oracle_type": format!("{:?}", otype), 
             "raw_type": raw_types[i],
             "bigquery_type": bigquery_schema_mapper::map_oracle_to_bq(otype, Some(&raw_types[i]))
-        }));
+        });
+        if let Some(Some(comment)) = col_comments.get(i) {
+            obj["description"] = json!(comment);
+        }
+        cols.push(obj);
     }
     if enable_row_hash {
         cols.push(json!({
