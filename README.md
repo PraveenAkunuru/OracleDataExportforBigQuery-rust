@@ -1,98 +1,94 @@
 # Oracle Data Exporter for BigQuery (Rust)
 
-I built this tool to solving a specific problem: moving massive Oracle tables to BigQuery was too slow and fragile with existing Python scripts. This is a complete rewrite in Rust, designed for raw speed, stability, and correctness.
+A high-performance, multi-threaded tool to export Oracle tables to BigQuery-ready compressed CSVs. It handles type mapping, parallel chunking, and validation automatically.
 
-## Why use this?
+## 🚀 Getting Started
 
-*   **Speed**: It’s multi-threaded and asynchronous. On my benchmarks, it handles ~40-60 MB/s per node (depending on network), which is about 30x faster than the legacy single-threaded Python exporter.
-*   **Correctness**: It doesn't just dump data. It handles weird Oracle types (`TIMESTAMP WITH TIME ZONE`, `INTERVAL`, `XMLTYPE`) and maps them correctly to BigQuery standards.
-*   **Safety**: It supports "Client-Side Hashing" (calculating SHA256 in Rust) so you can verify data integrity without burning CPU cycles on your production Oracle database.
-*   **Zero-Dependency**: The binary stands alone. You don't need to install Python, pip, or hunt down dependencies on your servers. Just drop the binary and the Oracle Instant Client libraries.
+### Linux (RHEL/CentOS/Ubuntu)
+1.  **Download** the release tarball to your server.
+2.  **Extract** and enter the directory:
+    ```bash
+    tar -xzvf oracle_exporter_dist.tar.gz
+    cd oracle_exporter_dist
+    ```
+3.  **Run** using the wrapper script (sets up library paths for you):
+    ```bash
+    ./run.sh --help
+    ```
 
-## Prerequisites
+### Windows
+1.  **Download** the release zip.
+2.  **Extract** to a folder (e.g., `C:\oracle_exporter`).
+3.  **Install** [Oracle Instant Client Basic Lite](https://www.oracle.com/database/technologies/instant-client/downloads.html) and add it to your `PATH`.
+4.  **Run** via PowerShell:
+    ```powershell
+    .\oracle_rust_exporter.exe --help
+    ```
 
-You just need two things:
-1.  **Oracle Instant Client**: The proprietary Oracle libraries (`libclntsh.so`).
-2.  **Environment**: Linux (RHEL/CentOS/Debian) is the primary target.
+---
 
-## Building
+## 🛠 Common Tasks
 
-If you want to build it yourself:
+### 1. Run a Full Export
+The best way to run production exports is using a configuration file.
 
+1.  Create `config.yaml` (see [example](tests/configs/integration/config_perf_client_hash.yaml)):
+    ```yaml
+    database:
+      username: "HR"
+      password: "password"
+      host: "192.168.1.10"
+      service: "ORCL"
+    export:
+      output_dir: "./exports"
+      schemas: ["HR", "SALES"]
+    ```
+2.  Run the exporter:
+    ```bash
+    ./run.sh --config config.yaml
+    ```
+
+### 2. Run a Single Table (Ad-Hoc)
+You don't need a config file for quick exports. You can use CLI arguments.
+
+**Command**:
 ```bash
-cargo build --release
+./run.sh \
+  --username SYSTEM --password manager \
+  --host localhost --service ORCLPDB \
+  --table HR.EMPLOYEES \
+  --output ./exports/hr_employees
 ```
+*Note: This output mode (`--output ./dir`) activates the Coordinator, enabling parallel chunking for large tables.*
 
-To create a deployable bundle (zip file) with all the scripts and libs included:
+### 3. Resuming a Failed Export
+The exporter is **idempotent**. 
+If a job fails (e.g., network disconnect), just **run the exact same command again**.
 
-```bash
-./build_bundle.sh
-```
+-   It automatically checks for existing `*.csv.gz` files.
+-   **Skips** chunks that are already on disk.
+-   **Retries** chunks that are missing.
+-   **Retries** chunks that are missing.
 
-## How to Run
+### 4. Advanced Features Support
+The exporter automatically handles complex Oracle scenarios:
 
-There are two ways to use this.
+*   **Virtual Columns**: Detected and exported via a **Physical Table / Logical View** split in BigQuery.
+    *   Data is stored in `_PHYSICAL` table (excluding virtual columns).
+    *   Logic is restored in the `VIEW` (e.g., `TOTAL_COST` as `QUANTITY * PRICE`).
+*   **Spatial Data (`SDO_GEOMETRY`)**:
+    *   Extracted as **WKT** (Well-Known Text).
+    *   BigQuery View automatically converts it to `GEOGRAPHY` type.
+*   **Adaptive Parallelism**:
+    *   Automatically throttles concurrency based on **Oracle Server load** to prevent database saturation.
+    *   Just remove `parallel` from your config to enable.
+---
 
-### 1. The "Just Export One Table" Mode
+## 📚 Documentation
+For deep dives, architecture explanations, and tuning guides, see:
 
-Great for ad-hoc dumps or testing.
-
-```bash
-# Point to your Instant Client first!
-export LD_LIBRARY_PATH=/opt/oracle/instantclient:$LD_LIBRARY_PATH
-
-./oracle_rust_exporter \
-  --host 10.0.0.5 \
-  --service ORCL \
-  --username SCOTT \
-  --password tiger \
-  --table EMP \
-  --output ./emp.csv.gz
-```
-
-### 2. Coordinator Mode (Production)
-
-This is what you should use for actual migrations. It reads a config file, discovers metadata, splits large tables into chunks (automatically!), and can even generate the BigQuery table schemas for you.
-
-```bash
-./oracle_rust_exporter --config config.yaml
-```
-
-**Minimal `config.yaml`:**
-
-```yaml
-database:
-  username: "SCOTT"
-  password: "tiger"
-  host: "10.0.0.5"
-  port: 1521
-  service: "ORCL"
-
-export:
-  output_dir: "./data_dump"
-  schemas: ["SCOTT"]       # Schemas to scan
-  parallel: 8              # Threads to use
-  use_client_hash: true    # Enable the fast Rust-side hashing
-```
-
-## What you get
-
-After running the coordinator, you'll see a structure like this:
-
-```
-data_dump/
-  SCOTT/
-    EMP/
-      data/
-        data_chunk_0.csv.gz
-        data_chunk_1.csv.gz
-      config/
-        bigquery_schema.json    # Ready for 'bq load'
-        oracle_ddl.sql          # In case you need the source DDL
-        load_command.sh         # A helper script to load this into BQ
-```
-
-## Tuning Tips
-
-*   **`parallel`**: Start with 4 or 8. If your network is fast, you can push this higher, but watch your DB load.
-*   **`use_client_hash`**: Always keep this `true` for large tables. It offloads the expensive SHA256 calculation to the exporter (Rust), saving your Oracle DB from CPU spikes.
+-   **[ARCHITECTURE.md](ARCHITECTURE.md)**: The Master Reference.
+    -   **Architecture Map**: Codebase structure.
+    -   **Performance Tuning**: Handling slow networks & CPU.
+    -   **Operational Handbook**: Verification & Maintenance.
+    -   **Deployment Strategy**: How the "Zero-Install" build works.

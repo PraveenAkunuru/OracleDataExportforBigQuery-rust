@@ -6,7 +6,7 @@ use serde_json::Value;
 /// Gets a GCP Access Token using `gcloud auth print-access-token`
 fn get_access_token() -> Result<String, Box<dyn Error>> {
     let output = Command::new("gcloud")
-        .args(&["auth", "print-access-token"])
+        .args(["auth", "print-access-token"])
         .output()?;
 
     if !output.status.success() {
@@ -60,7 +60,7 @@ pub fn translate_ddl_cli(
     
     // Use curl to POST
     let output = Command::new("curl")
-        .args(&[
+        .args([
             "-X", "POST",
             "-H", &format!("Authorization: Bearer {}", token),
             "-H", "Content-Type: application/json",
@@ -98,7 +98,7 @@ pub fn translate_ddl_cli(
         // If long running, might need refresh logic. For now, simplistic.
         
         let poll_out = Command::new("curl")
-            .args(&[
+            .args([
                 "-H", &format!("Authorization: Bearer {}", token),
                 &poll_url
             ])

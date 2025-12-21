@@ -1,0 +1,30 @@
+database:
+  username: TESTUSER
+  password: testpassword
+  host: localhost
+  port: 1521
+  service: FREEPDB1
+
+# gcp:
+#   project_id: pakunuru-1119-20250930202256
+#   dataset: TESTUSER
+#   location: us
+#   gcs_bucket: placeholder-bucket
+
+bigquery:
+  project: pakunuru-1119-20250930202256
+  dataset: TESTUSER
+
+export:
+  output_dir: ./features_test_output
+  parallel: 4
+  tables:
+    - TEST_VIRTUAL_COLS
+    - TEST_SPATIAL
+    - TEST_INTERVALS
+    - TEST_BOOLEAN
+    # TEST_UROWID_TABLE - Urowid might need special handling if empty, skipping explicit check for now to focus on main types
+    
+  # Enable row hash to verify it works with these types
+  enable_row_hash: true
+  use_client_hash: true

@@ -29,11 +29,15 @@ const SQL_GET_PK: &str = "
 ";
 const SQL_DROP_PARALLEL_TASK: &str = "BEGIN DBMS_PARALLEL_EXECUTE.DROP_TASK(:1); END;";
 pub const SQL_GET_COLUMNS: &str = "
-    SELECT column_name, data_type 
-    FROM all_tab_columns 
-    WHERE table_name = :1 
-      AND owner = :2 
-    ORDER BY column_id
+    SELECT c.column_name, c.data_type, cm.comments
+    FROM all_tab_columns c
+    LEFT JOIN all_col_comments cm 
+      ON c.owner = cm.owner 
+      AND c.table_name = cm.table_name 
+      AND c.column_name = cm.column_name
+    WHERE c.table_name = :1 
+      AND c.owner = :2 
+    ORDER BY c.column_id
 ";
 const SQL_GET_PARTITION_KEYS: &str = "
     SELECT column_name
@@ -170,19 +174,16 @@ pub fn generate_chunks(conn: &Connection, schema: &str, table: &str, chunk_count
     // 4. Fetch the Ranges
     let rows = conn.query(SQL_FETCH_CHUNKS, &[&task_name])?;
     let mut chunks = Vec::new();
-    let mut id = 0;
-    
-    for row_result in rows {
+    for (id, row_result) in rows.enumerate() {
         let row = row_result?;
         let start_rowid: String = row.get(0)?;
         let end_rowid: String = row.get(1)?;
         
         chunks.push(Chunk {
-            chunk_id: id,
+            chunk_id: id as u32,
             start_rowid,
             end_rowid,
         });
-        id += 1;
     }
 
     // 5. Cleanup
@@ -191,9 +192,17 @@ pub fn generate_chunks(conn: &Connection, schema: &str, table: &str, chunk_count
     Ok(chunks)
 }
 
-/// Retrieves column names and types for a table.
+/// Struct to hold column metadata
+pub struct TableColumns {
+    pub names: Vec<String>,
+    pub types: Vec<oracle::sql_type::OracleType>,
+    pub raw_types: Vec<String>,
+    pub comments: Vec<Option<String>>,
+}
+
+/// Retrieves column names, types, raw types, and comments for a table.
 /// Useful for BigQuery schema generation.
-pub fn get_table_columns(conn: &Connection, schema: &str, table: &str) -> Result<(Vec<String>, Vec<oracle::sql_type::OracleType>, Vec<String>)> {
+pub fn get_table_columns(conn: &Connection, schema: &str, table: &str) -> Result<TableColumns> {
     // 1. Get exact OracleType via dummy query (best for Numeric precision/scale)
     let sql_dummy = format!("SELECT * FROM \"{}\".\"{}\" WHERE 1=0", schema, table);
     let mut stmt = conn.statement(&sql_dummy).build()?;
@@ -205,28 +214,85 @@ pub fn get_table_columns(conn: &Connection, schema: &str, table: &str) -> Result
     let rows_meta = stmt_meta.query(&[&table.to_uppercase(), &schema.to_uppercase()])?;
     
     let mut type_strings = std::collections::HashMap::new();
+    let mut comments_map = std::collections::HashMap::new();
+
     for row_res in rows_meta {
         let row = row_res?;
         let name: String = row.get(0)?;
         let data_type: String = row.get(1)?;
-        type_strings.insert(name.to_uppercase(), data_type);
+        let comment: Option<String> = row.get(2)?; // Index 2 is comments
+        
+        let name_upper = name.to_uppercase();
+        type_strings.insert(name_upper.clone(), data_type);
+        if let Some(c) = comment {
+            comments_map.insert(name_upper, c);
+        }
     }
 
     let mut names = Vec::new();
     let mut types = Vec::new();
     let mut strings = Vec::new();
+    let mut comments = Vec::new();
 
     for c in col_infos {
         let name = c.name().to_string();
         let name_upper = name.to_uppercase();
         let type_str = type_strings.get(&name_upper).cloned().unwrap_or_else(|| "UNKNOWN".to_string());
+        let comment = comments_map.get(&name_upper).cloned();
         
         names.push(name);
         types.push(c.oracle_type().clone());
         strings.push(type_str);
+        comments.push(comment);
     }
     
-    Ok((names, types, strings))
+    Ok(TableColumns {
+        names,
+        types,
+        raw_types: strings,
+        comments,
+    })
+}
+
+/// Retrieves a map of Virtual Columns and their generation expressions (DATA_DEFAULT).
+/// Uses XML trick to read DATA_DEFAULT (LONG type) safely.
+pub fn get_virtual_columns_map(conn: &Connection, schema: &str, table: &str) -> std::collections::HashMap<String, String> {
+    // Note: ALL_TAB_COLUMNS has DATA_DEFAULT as LONG.
+    // XMLGen is the standard workaround to read LONGs in SQL.
+    let sql = "
+        SELECT COLUMN_NAME, 
+               extract(xmltype(dbms_xmlgen.getxml('select data_default from all_tab_cols where owner = ''' || owner || ''' and table_name = ''' || table_name || ''' and column_name = ''' || column_name || '''')), '//text()').getStringVal() as DATA_DEFAULT 
+        FROM all_tab_cols 
+        WHERE owner = :1 
+          AND table_name = :2 
+          AND virtual_column = 'YES'
+    ";
+    
+    let mut map = std::collections::HashMap::new();
+    let stmt_res = conn.statement(sql).build();
+    
+    if let Ok(mut stmt) = stmt_res {
+        info!("Executing Virtual Column Query for {}.{}", schema, table);
+        let rows_res = stmt.query(&[&schema.to_uppercase(), &table.to_uppercase()]);
+         if let Ok(rows) = rows_res {
+             for row in rows.flatten() {
+                 let name: Result<String> = row.get(0);
+                     let expr: Result<String> = row.get(1);
+                     
+                     if let (Ok(n), Ok(e)) = (name, expr) {
+                         let unescaped_expr = e.replace("&quot;", "\"")
+                                               .replace("&apos;", "'")
+                                               .replace("&lt;", "<")
+                                               .replace("&gt;", ">")
+                                               .replace("&amp;", "&");
+                         map.insert(n.to_uppercase(), unescaped_expr);
+                     }
+             }
+         }
+        }
+
+    
+    map
 }
 
 /// Fetches the Oracle DDL for a table using DBMS_METADATA.GET_DDL
@@ -289,4 +355,40 @@ pub fn get_index_columns(conn: &Connection, schema: &str, table: &str) -> Result
         cols.push(col);
     }
     Ok(cols)
+}
+
+/// Attempts to get the CPU count of the Oracle Database Server.
+/// Tries `V$OSSTAT` first, then `V$PARAMETER`.
+/// Returns Ok(None) if permissions are denied or rows not found.
+pub fn get_db_cpu_count(conn: &Connection) -> Result<Option<usize>> {
+    // Try v$osstat
+    // Requires SELECT privileges on v$osstat
+    match conn.query_row("SELECT value FROM v$osstat WHERE stat_name = 'NUM_CPUS'", &[]) {
+        Ok(row) => {
+            let val: Result<f64> = row.get(0); // Often returns number
+            if let Ok(v) = val {
+                return Ok(Some(v as usize));
+            }
+        },
+        Err(e) => {
+            debug!("Failed to query v$osstat: {}", e);
+        }
+    }
+
+    // Try v$parameter
+    match conn.query_row("SELECT value FROM v$parameter WHERE name = 'cpu_count'", &[]) {
+        Ok(row) => {
+             let val: Result<String> = row.get(0);
+             if let Ok(s) = val {
+                 if let Ok(num) = s.parse::<usize>() {
+                     return Ok(Some(num));
+                 }
+             }
+        },
+        Err(e) => {
+            debug!("Failed to query v$parameter: {}", e);
+        }
+    }
+
+    Ok(None)
 }

@@ -24,5 +24,6 @@ tonic = "0.12"
 tempfile = "3.23.0"
 sha2 = "0.10.9"
 hex = "0.4.3"
+regex = "1.10"
 
 [dev-dependencies]

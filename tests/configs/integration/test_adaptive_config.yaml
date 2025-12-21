@@ -1,0 +1,12 @@
+database:
+  username: "TESTUSER"
+  password: "testpassword"
+  host: "localhost"
+  port: 1521
+  service: "FREEPDB1"
+
+export:
+  output_dir: "./adaptive_output"
+  schemas: ["TESTUSER"]
+  cpu_percent: 50
+  adaptive_parallelism: true
