@@ -37,9 +37,13 @@ pub fn save_all_artifacts(
     field_delimiter: &str,
     project: &str,
     dataset: &str,
+    pk_cols: Option<&[String]>,
+    partition_cols: &[String],
+    index_cols: &[String],
+    gcs_bucket: Option<&str>,
 ) -> std::io::Result<()> {
     // 1. Generate BigQuery DDL
-    let bq_ddl = generate_bigquery_ddl(project, dataset, table, columns, col_types, raw_types, enable_row_hash);
+    let bq_ddl = generate_bigquery_ddl(project, dataset, table, columns, col_types, raw_types, enable_row_hash, pk_cols, partition_cols, index_cols);
     write_file(config_dir.join("bigquery.ddl"), &bq_ddl)?;
 
     // 1b. Generate BigQuery Schema JSON
@@ -57,7 +61,7 @@ pub fn save_all_artifacts(
     write_file(config_dir.join("oracle.ddl"), oracle_ddl_content)?;
 
     // 3. Generate Load Command (shell script)
-    let load_cmd = generate_load_command(project, dataset, table, field_delimiter);
+    let load_cmd = generate_load_command(project, dataset, table, field_delimiter, gcs_bucket);
     write_file(config_dir.join("load_command.sh"), &load_cmd)?;
     // Make executable? In Docker/Linux, we can try, but std::fs::set_permissions is unix specific.
     #[cfg(unix)]
@@ -103,30 +107,140 @@ fn write_file(path: PathBuf, content: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn generate_bigquery_ddl(project: &str, dataset: &str, table: &str, columns: &[String], col_types: &[OracleType], raw_strings: &[String], enable_row_hash: bool) -> String {
+fn generate_bigquery_ddl(
+    project: &str, 
+    dataset: &str, 
+    table: &str, 
+    columns: &[String], 
+    col_types: &[OracleType], 
+    raw_strings: &[String], 
+    enable_row_hash: bool,
+    pk_cols: Option<&[String]>,
+    partition_cols: &[String],
+    index_cols: &[String]
+) -> String {
     let mut lines = Vec::new();
     lines.push(format!("CREATE OR REPLACE TABLE `{}.{}.{}` (", project, dataset, table));
     
+    // Column Definitions
     for (i, ((name, otype), rtype)) in columns.iter().zip(col_types.iter()).zip(raw_strings.iter()).enumerate() {
         let bq_type = bigquery_schema_mapper::map_oracle_to_bq_ddl(otype, Some(rtype));
-        let comma = if i < columns.len() - 1 || enable_row_hash { "," } else { "" };
+        let comma = if i < columns.len() - 1 || enable_row_hash || pk_cols.is_some() { "," } else { "" };
         lines.push(format!("  {} {}{}", name, bq_type, comma));
     }
     
     if enable_row_hash {
-        lines.push("  ROW_HASH STRING NOT NULL".to_string());
+        let comma = if pk_cols.is_some() { "," } else { "" };
+        lines.push(format!("  ROW_HASH STRING NOT NULL{}", comma));
+    }
+
+    // Primary Key (Not Enforced)
+    if let Some(pks) = pk_cols {
+        let pk_list = pks.join(", ");
+        lines.push(format!("  PRIMARY KEY ({}) NOT ENFORCED", pk_list));
     }
     
-    lines.push(");".to_string());
+    lines.push(")".to_string());
+
+    // Partitioning & Clustering Logic
+    let mut partition_by_clause = None;
+    let mut cluster_candidates = Vec::new();
+
+    // 1. Identify Partition Column
+    // BQ supports only ONE partition column (usually). We pick the first valid one.
+    // If it's a STRING, we treat it as a candidate for Clustering instead.
+    for p_col in partition_cols {
+        // Find type
+        if let Some(pos) = columns.iter().position(|c| c.eq_ignore_ascii_case(p_col)) {
+             let otype = &col_types[pos];
+             let rtype = &raw_strings[pos];
+             let bq_type = bigquery_schema_mapper::map_oracle_to_bq_ddl(otype, Some(rtype));
+             
+             // Check compatibility
+             if bq_type.starts_with("TIMESTAMP") || bq_type.starts_with("DATE") || bq_type.starts_with("DATETIME") {
+                 if partition_by_clause.is_none() {
+                     partition_by_clause = Some(format!("PARTITION BY {}", p_col));
+                 }
+             } else if bq_type.starts_with("INT") || bq_type.starts_with("INTEGER") || bq_type.contains("NUMERIC") || bq_type.contains("DECIMAL") {
+                 // Integer Range Partitioning
+                 // We use a safe default range. In production, users should adjust this.
+                 if partition_by_clause.is_none() {
+                     // Default: 0 to 1M with step 1000 (1000 partitions)
+                     partition_by_clause = Some(format!("PARTITION BY RANGE_BUCKET({}, GENERATE_ARRAY(0, 1000000, 1000))", p_col));
+                 }
+             } else {
+                 // Strings etc -> Clustering
+                 cluster_candidates.push(p_col.clone());
+             }
+        }
+    }
+
+    if let Some(clause) = partition_by_clause {
+        lines.push(clause);
+    }
+
+    // 2. Build Clustering Keys
+    // Order: PKs -> Indexes -> (Partition Keys that were demoted)
+    let mut final_cluster_keys = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Add PKs
+    if let Some(pks) = pk_cols {
+        for pk in pks {
+            if !seen.contains(pk) {
+                final_cluster_keys.push(pk.clone());
+                seen.insert(pk.clone());
+            }
+        }
+    }
+
+    // Add Indexes
+    for idx in index_cols {
+         if !seen.contains(idx) {
+             final_cluster_keys.push(idx.clone());
+             seen.insert(idx.clone());
+         }
+    }
+
+    // Add Demoted Partition Keys
+    for p in cluster_candidates {
+        if !seen.contains(&p) {
+            final_cluster_keys.push(p.clone());
+            seen.insert(p.clone());
+        }
+    }
+
+    // BQ Cap: 4 columns
+    if !final_cluster_keys.is_empty() {
+        let count = std::cmp::min(4, final_cluster_keys.len());
+        let cluster_str = final_cluster_keys[0..count].join(", ");
+        lines.push(format!("CLUSTER BY {}", cluster_str));
+    }
+
+    lines.push(";".to_string());
     lines.join("\n")
 }
 
-fn generate_load_command(project: &str, dataset: &str, table: &str, delimiter: &str) -> String {
+fn generate_load_command(project: &str, dataset: &str, table: &str, delimiter: &str, gcs_bucket: Option<&str>) -> String {
     // bq load requires special syntax for hex/non-printable chars
     let bq_delimiter = if delimiter == "\u{0010}" {
         "$'\\x10'".to_string()
     } else {
         format!("'{}'", delimiter)
+    };
+
+    let bucket_logic = if let Some(bucket) = gcs_bucket {
+        format!(r#"
+    # GCS Upload Enabled
+    GCS_URI="gs://{}/{}/{}/{}/data/$(basename "$f")"
+    echo "Uploading $f to $GCS_URI..."
+    gcloud storage cp "$f" "$GCS_URI"
+    LOAD_SOURCE="$GCS_URI"
+"#, bucket, project, dataset, table)
+    } else {
+        r#"
+    LOAD_SOURCE="$f"
+"#.to_string()
     };
 
     format!(r#"#!/bin/bash
@@ -139,7 +253,8 @@ fn generate_load_command(project: &str, dataset: &str, table: &str, delimiter: &
 first=1
 for f in ../data/*.csv.gz; do
   if [ ! -f "$f" ]; then continue; fi
-  
+  {}
+
   if [ "$first" -eq 1 ]; then
     echo "Loading initial chunk (REPLACE): $f"
     bq load \
@@ -152,7 +267,7 @@ for f in ../data/*.csv.gz; do
         --allow_jagged_rows=false \
         --schema=schema.json \
         {}:{}.{} \
-        "$f"
+        "$LOAD_SOURCE"
     first=0
   else
     echo "Loading chunk (APPEND): $f"
@@ -166,7 +281,7 @@ for f in ../data/*.csv.gz; do
         --allow_jagged_rows=false \
         --schema=schema.json \
         {}:{}.{} \
-        "$f"
+        "$LOAD_SOURCE"
   fi
   
   if [ $? -ne 0 ]; then
@@ -175,6 +290,7 @@ for f in ../data/*.csv.gz; do
   fi
 done
 "#, 
+    bucket_logic,
     bq_delimiter, project, dataset, table, 
     bq_delimiter, project, dataset, table
     )

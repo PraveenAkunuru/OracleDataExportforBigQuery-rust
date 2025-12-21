@@ -23,6 +23,17 @@ pub struct AppConfig {
     pub export: ExportConfig,
     /// BigQuery settings (Optional, mostly for schema gen)
     pub bigquery: Option<BigQueryConfig>,
+    /// GCP settings for Translation API
+    pub gcp: Option<GcpConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct GcpConfig {
+    pub project_id: String,
+    pub location: String,
+    pub gcs_bucket: String,
+    /// If true, enforces strict decimal precision in BQ translation
+    pub decimal_precision_strictness: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -209,6 +220,7 @@ export:
                 schemas: None, schemas_file: None, tables: None, tables_file: None, load_to_bq: None,
             },
             bigquery: None,
+            gcp: None,
         };
 
         let args = CliArgs {

@@ -29,8 +29,11 @@ mod data_validator;
 mod artifact_generator;
 mod sql_generator_utils;
 pub mod bigquery_ingestion;
+pub mod gcp;
 
 use clap::Parser;
+// ... (lines omitted)
+
 use log::{info, error};
 use std::process;
 use crate::config::{AppConfig, CliArgs};
@@ -163,6 +166,7 @@ fn main() {
                           load_to_bq: Some(args.load),
                      },
                      bigquery: None,
+                     gcp: None,
                  };
                  
                  let coord = Coordinator::new(config);
