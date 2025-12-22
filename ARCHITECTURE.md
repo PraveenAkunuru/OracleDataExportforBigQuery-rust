@@ -233,7 +233,7 @@ We have rewritten a legacy Python Oracle-to-BigQuery exporter in **Rust**.
 *   **Host**: `localhost`.
 *   **Port**: `1521`.
 *   **Service Name**: `FREEPDB1` or `ORCLPDB`.
-*   **User**: `TESTUSER` / `testpassword`.
+*   **User**: `TESTUSER` / `*****`.
 *   **Connection String**: `//localhost:1521/FREEPDB1`.
 
 ### Runtime Requirements
