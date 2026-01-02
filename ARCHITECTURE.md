@@ -25,14 +25,14 @@ The application is structured to strictly decouple business orchestration from e
 *   **Interfaces**:
     *   [`metadata_port.rs`](src/ports/metadata_port.rs): Contract for metadata discovery and schema reading (`MetadataPort`).
     *   [`extraction_port.rs`](src/ports/extraction_port.rs): Contract for row-level data extraction (`ExtractionPort`).
-    *   [`storage_port.rs`](src/ports/storage_port.rs): Contract for writing sidecar artifacts (`StoragePort`).
+    *   [`artifact_port.rs`](src/ports/artifact_port.rs): Contract for writing sidecar artifacts (`ArtifactPort`).
 
 ### 4. Infrastructure Layer (`src/infrastructure/`)
 *   **Role**: Implementation of Ports using specific technologies.
 *   **Adapters**:
     *   [`metadata.rs`](src/infrastructure/oracle/metadata.rs): Queries Oracle dictionary views (`ALL_TAB_COLS`, etc.) with multi-layered fallback for size discovery.
     *   [`extractor.rs`](src/infrastructure/oracle/extractor.rs): Handles high-performance streaming to CSV or native Parquet.
-    *   [`fs_adapter.rs`](src/infrastructure/storage/fs_adapter.rs): Generates DDL, Schema JSON, and Load scripts on the local filesystem.
+    *   [`artifact_adapter.rs`](src/infrastructure/artifacts/artifact_adapter.rs): Generates DDL, Schema JSON, and Load scripts on the local filesystem.
     *   [`connection_manager.rs`](src/infrastructure/oracle/connection_manager.rs): Implements `r2d2` connection pooling for stable multi-threaded access.
 
 ---
@@ -54,6 +54,7 @@ For large tables, the exporter triggers a chunked export strategy coordinated by
 Implemented in [`extractor.rs`](src/infrastructure/oracle/extractor.rs):
 -   **Arrow Batching**: Oracle rows are streamed directly into Arrow arrays.
 -   **No Intermediate Text**: Data maps directly from Oracle OCI buffers to binary Parquet blocks, maximizing MB/s.
+-   **Improved Modularity**: Core SQL expression generation is decoupled into a `build_column_expression` helper within [`extractor.rs`](src/infrastructure/oracle/extractor.rs) for easier maintenance.
 
 ---
 
