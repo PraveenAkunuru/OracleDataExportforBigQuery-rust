@@ -11,89 +11,83 @@ The application is structured to strictly decouple business orchestration from e
 ### 1. Domain Layer (`src/domain/`)
 *   **Role**: Internal state and pure logic.
 *   **Key Files**:
-    *   [`export_models.rs`](src/domain/export_models.rs): Definitions for `TableMetadata`, `ExportTask`, and `TaskResult`.
-    *   [`bq_type_mapper.rs`](src/domain/bq_type_mapper.rs): Translation rules for converting Oracle types to BigQuery types.
-    *   [`error_definitions.rs`](src/domain/error_definitions.rs): Centralized error handling using `thiserror`.
+    *   [`entities.rs`](src/domain/entities.rs): Definitions for `TableMetadata`, `ExportTask`, and `TaskResult`.
+    *   [`mapping.rs`](src/domain/mapping.rs): Translation rules for converting Oracle types to Arrow/BigQuery types.
+    *   [`errors.rs`](src/domain/errors.rs): Centralized error handling using `thiserror`.
 
 ### 2. Application Layer (`src/application/`)
 *   **Role**: Orchestration and coordination.
 *   **Key Files**:
-    *   [`export_orchestrator.rs`](src/application/export_orchestrator.rs): The "Brain". Discovers tables, manages Rayon parallel pools, and executes tasks.
+    *   [`orchestrator.rs`](src/application/orchestrator.rs): The "Brain". Discovers tables, manages Rayon parallel pools, and coordinates tasks.
 
 ### 3. Ports (`src/ports/`)
 *   **Role**: Dependency inversion contracts (Traits).
 *   **Interfaces**:
-    *   `SchemaReader`: Contract for metadata discovery.
-    *   `DataStreamer`: Contract for row extraction.
-    *   `ArtifactWriter`: Contract for writing sidecar files.
+    *   `MetadataPort`: Contract for metadata discovery and schema reading.
+    *   `ExtractionPort`: Contract for row-level data extraction.
+    *   `StoragePort`: Contract for writing sidecar artifacts (DDL, JSON).
 
 ### 4. Infrastructure Layer (`src/infrastructure/`)
 *   **Role**: Implementation of Ports using specific technologies.
 *   **Adapters**:
-    *   `OracleMetadataAdapter`: Queries `ALL_TAB_COLS`, `ALL_CONSTRAINTS`, etc.
-    *   `OracleExtractionAdapter`: Handles `oracle-rust` connection pooling and streaming.
-    *   `LocalArtifactAdapter`: Generates DDL/JSON on the local filesystem.
+    *   `MetadataAdapter`: Queries Oracle dictionary views (`ALL_TAB_COLS`, etc.) with multi-layered fallback for size discovery.
+    *   `Extractor`: Handles high-performance streaming to CSV or native Parquet.
+    *   `FsAdapter`: Generates DDL, Schema JSON, and Load scripts on the local filesystem.
+    *   `ConnectionManager`: Implements `r2d2` connection pooling for stable multi-threaded access.
 
 ---
 
 ## ⚡ Performance Strategies
 
-### 1. Parallel Chunking (DBMS_PARALLEL_EXECUTE)
-For tables larger than **1GB**, the exporter triggers a chunked export strategy:
--   It uses `DBMS_PARALLEL_EXECUTE.CREATE_CHUNKS_BY_ROWID` on the Oracle side.
--   Chunks are fetched as `(start_rowid, end_rowid)` pairs.
--   Each chunk is assigned to a worker in the Rayon thread pool.
--   Workers execute independent `SELECT ... WHERE ROWID BETWEEN ...` queries.
+### 1. Connection Pooling (R2D2)
+To maximize throughput without overwhelming the Oracle listener, the exporter uses an internal connection pool:
+-   **Stable Parallelism**: Threads pull connections from the pool as needed.
+-   **Resource Safety**: Prevents "too many sessions" errors during large-scale parallel exports.
 
-### 2. Zero-Copy Streaming
-Data flow is designed to minimize memory overhead:
--   **CSV Flow**: Oracle Cursor -> Row Buffer -> CSV Formatter -> Gzip Encoder -> File Stream.
--   **Parquet Flow**: Oracle Cursor -> Row Buffer (Batch) -> Arrow Array -> Parquet RowGroup -> File Stream.
--   The application never loads a full table (or even a full chunk) into RAM.
+### 2. Parallel Chunking (DBMS_PARALLEL_EXECUTE)
+For large tables, the exporter triggers a chunked export strategy:
+-   Uses `DBMS_PARALLEL_EXECUTE.CREATE_CHUNKS_BY_ROWID` for physical range splitting.
+-   **Resilient Cleanup**: Chunks are cleaned up immediately after metadata fetch via an internal closure-wrap to ensure no stale tasks remain in Oracle.
+-   **Size Fallback**: If `ALL_SEGMENTS` is inaccessible, it falls back to `USER_SEGMENTS` and then to table statistics.
 
-### 3. Adaptive Parallelism
-If `parallel` is not specified, the exporter calculates concurrency based on:
--   `DB Server CPU Count` (discovered via `SchemaReader`).
--   `Local Host CPU Count`.
--   The lower of the two is used to avoid saturating either end.
+### 3. Zero-Copy Native Parquet
+-   **Arrow Batching**: Oracle rows are streamed directly into Arrow arrays.
+-   **No Intermediate Text**: Data maps directly from Oracle OCI buffers to binary Parquet blocks, maximizing MB/s.
 
 ---
 
-## 💎 Specialized Data Handling
+## 📈 Benchmarks (Oracle 23c Docker Environment)
+
+The following metrics represent real-world performance verified in the integration test environment (Table: `ALL_TYPES_TEST2`, ~8M rows):
+
+| Format | Throughput (MB/s) | Throughput (Rows/s) | CPU Usage |
+| :--- | :--- | :--- | :--- |
+| **CSV (Gzip)** | **18.8 MB/s** | ~63,000 | Moderate (Gzip limit) |
+| **Parquet** | **17.0 MB/s** | ~26,000 | High (Arrow Serialization) |
+
+---
+
+## 🛡️ Resiliency Features
+
+### 1. DATA_DEFAULT Protection
+Oracle virtual columns are backed by `LONG` columns in the dictionary. The exporter monitors the length of these expressions and warns if they approach or exceed the 32KB truncation limit, ensuring schema data integrity.
+
+### 2. Contextual Error Reporting
+Errors are enriched with `table_name` and `chunk_id` context as they bubble up through the hexagonal layers, allowing for precise debugging in large-scale migrations.
+
+---
+
+## 🔍 Specialized Data Handling
 
 ### Virtual Columns
-Oracle virtual columns are not physical data. The exporter:
-1.  Discovers the SQL expression via `ALL_TAB_COLS.DATA_DEFAULT`.
-2.  Excludes the column from the `bq load` process (Physical Table).
-3.  Creates a **BigQuery View** that re-implements the expression.
+The exporter re-implements Oracle virtual columns as **BigQuery Views**, ensuring logic parity between the source and target.
 
 ### Spatial Data (`SDO_GEOMETRY`)
-Spatial data is extracted using `SDO_UTIL.TO_WKTGEOMETRY(col)`.
-The generated BigQuery View casts the resulting string to the `GEOGRAPHY` type.
-
-### Raw/Binary Data
-`BLOB` and `RAW` types are automatically encoded as **Base64** during extraction when using CSV. In Parquet mode, they are handled as binary arrays.
-
----
-
-## 🛡️ Operational Handbook
-
-### Verification
-The tool includes a `validate_table` method (in `SchemaReader`) that can verify:
--   Row counts (Source vs Target).
--   Primary Key Hashes.
--   Column Aggregates (Sum/Min/Max).
-
-### Deployment (Zero-Install)
-The recommended deployment is a "portable" directory containing:
--   `oracle_rust_exporter`: The statically linked Rust binary (except for Oracle client).
--   `lib/`: Minimal Oracle Instant Client shared libraries.
--   `run.sh`: Wrapper to set `LD_LIBRARY_PATH`.
+Spatial data is extracted via `SDO_UTIL.TO_WKTGEOMETRY` and cast to BigQuery `GEOGRAPHY`.
 
 ---
 
 ## 🛠️ Maintainer Notes
 
-*   **Adding a New Type**: Update `map_oracle_to_bq` in `bq_type_mapper.rs`.
-*   **Adding GCS Support**: Create a `GcsArtifactAdapter` in `src/infrastructure/gcp/` implementing the `ArtifactWriter` port.
-*   **Testing**: Always run `./run_docker_test.sh` before merging significant changes.
+*   **Adding a Type**: Update `map_oracle_to_arrow` in `mapping.rs`.
+*   **Integration Testing**: Run `tests/scripts/run_all.sh` to execute the full 360-degree verification suite.
