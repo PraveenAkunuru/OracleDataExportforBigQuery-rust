@@ -1,7 +1,7 @@
 //! # Type Mapping Logic
 //!
-//! This module is the "Translator". Oracle and BigQuery speak different languages 
-//! when it comes to data types. This module ensures that a `NUMBER(10,0)` in 
+//! This module is the "Translator". Oracle and BigQuery speak different languages
+//! when it comes to data types. This module ensures that a `NUMBER(10,0)` in
 //! Oracle becomes an `INT64` in BigQuery, and so on.
 //!
 //! We map each Oracle type to three different things:
@@ -65,9 +65,17 @@ pub fn get_mapping(oracle_type: &OracleType, raw_type: Option<&str>) -> MappingE
             let (bq, ddl, arrow) = if *scale == -127 {
                 // scale -127 means it's a FLOAT in Oracle.
                 if *prec == 0 {
-                    ("BIGNUMERIC".to_string(), "BIGNUMERIC".to_string(), DataType::Utf8)
+                    (
+                        "BIGNUMERIC".to_string(),
+                        "BIGNUMERIC".to_string(),
+                        DataType::Utf8,
+                    )
                 } else {
-                    ("FLOAT64".to_string(), "FLOAT64".to_string(), DataType::Float64)
+                    (
+                        "FLOAT64".to_string(),
+                        "FLOAT64".to_string(),
+                        DataType::Float64,
+                    )
                 }
             } else if *scale == 0 {
                 // scale 0 means it's an INTEGER.
@@ -76,7 +84,11 @@ pub fn get_mapping(oracle_type: &OracleType, raw_type: Option<&str>) -> MappingE
                     ("INT64".to_string(), "INT64".to_string(), DataType::Int64)
                 } else {
                     // Too big for INT64, use BIGNUMERIC.
-                    ("BIGNUMERIC".to_string(), "BIGNUMERIC".to_string(), DataType::Utf8)
+                    (
+                        "BIGNUMERIC".to_string(),
+                        "BIGNUMERIC".to_string(),
+                        DataType::Utf8,
+                    )
                 }
             } else {
                 // It's a DECIMAL (e.g., NUMBER(10,2)).
@@ -101,14 +113,14 @@ pub fn get_mapping(oracle_type: &OracleType, raw_type: Option<&str>) -> MappingE
                 arrow_type: arrow,
             }
         }
-        
+
         // Floating point numbers.
         OracleType::Float(_) | OracleType::BinaryFloat | OracleType::BinaryDouble => MappingEntry {
             bq_type: "FLOAT64".to_string(),
             bq_ddl_type: "FLOAT64".to_string(),
             arrow_type: DataType::Float64,
         },
-        
+
         // Strings and Text.
         OracleType::Char(_)
         | OracleType::NChar(_)
@@ -122,22 +134,25 @@ pub fn get_mapping(oracle_type: &OracleType, raw_type: Option<&str>) -> MappingE
             bq_ddl_type: "STRING".to_string(),
             arrow_type: DataType::Utf8,
         },
-        
+
         // Dates and Times.
         OracleType::Date | OracleType::Timestamp(_) => MappingEntry {
             bq_type: "DATETIME".to_string(),
             bq_ddl_type: "DATETIME".to_string(),
             arrow_type: DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None),
         },
-        
+
         // Timezones.
         OracleType::TimestampTZ(_) | OracleType::TimestampLTZ(_) => MappingEntry {
             bq_type: "TIMESTAMP".to_string(),
             bq_ddl_type: "TIMESTAMP".to_string(),
-            arrow_type: DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, Some("UTC".into())),
+            arrow_type: DataType::Timestamp(
+                arrow_schema::TimeUnit::Microsecond,
+                Some("UTC".into()),
+            ),
         },
-        
-        // Binary Data (Images, PDFs, etc). 
+
+        // Binary Data (Images, PDFs, etc).
         // We export these as Base64 encoded strings in CSV, or raw Bytes in Parquet.
         OracleType::Raw(_) | OracleType::BLOB | OracleType::BFILE => MappingEntry {
             bq_type: "BYTES".to_string(),

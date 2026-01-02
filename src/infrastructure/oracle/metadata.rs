@@ -1,19 +1,19 @@
 //! # Oracle Metadata Adapter
 //!
-//! This is the "Brain" for Oracle discovery. It knows how to talk to Oracle's 
+//! This is the "Brain" for Oracle discovery. It knows how to talk to Oracle's
 //! system catalog to find out what tables and columns exist.
 //!
-//! It also handles "Parallel Chunking" by using the built-in Oracle 
+//! It also handles "Parallel Chunking" by using the built-in Oracle
 //! `DBMS_PARALLEL_EXECUTE` package.
 
-use crate::domain::mapping;
-use crate::domain::errors::{ExportError, Result};
 use crate::domain::entities::{ColumnMetadata, TableMetadata};
+use crate::domain::errors::{ExportError, Result};
+use crate::domain::mapping;
+use crate::infrastructure::oracle::connection_manager::OracleConnectionManager;
 use crate::ports::metadata_port::MetadataPort;
 use log::{debug, info, warn};
 use oracle::Connection;
 use r2d2::Pool;
-use crate::infrastructure::oracle::connection_manager::OracleConnectionManager;
 use std::sync::Arc;
 
 /// `MetadataAdapter` implements the `MetadataPort`.
@@ -27,8 +27,9 @@ impl MetadataAdapter {
     }
 
     fn get_conn(&self) -> Result<r2d2::PooledConnection<OracleConnectionManager>> {
-        self.pool.get()
-            .map_err(|e| ExportError::OracleError(format!("Failed to get connection from pool: {}", e)))
+        self.pool.get().map_err(|e| {
+            ExportError::OracleError(format!("Failed to get connection from pool: {}", e))
+        })
     }
 }
 
@@ -79,7 +80,9 @@ impl MetadataPort for MetadataAdapter {
         let mut tables = Vec::new();
         for row_result in rows {
             let row = row_result.map_err(|e| ExportError::OracleError(e.to_string()))?;
-            let name: String = row.get(0).map_err(|e| ExportError::OracleError(e.to_string()))?;
+            let name: String = row
+                .get(0)
+                .map_err(|e| ExportError::OracleError(e.to_string()))?;
             tables.push(name);
         }
         Ok(tables)
@@ -118,7 +121,9 @@ impl MetadataPort for MetadataAdapter {
                 &[],
             )
             .map_err(|e| ExportError::OracleError(e.to_string()))?;
-        let count_str: String = row.get(0).map_err(|e| ExportError::OracleError(e.to_string()))?;
+        let count_str: String = row
+            .get(0)
+            .map_err(|e| ExportError::OracleError(e.to_string()))?;
         count_str
             .parse::<usize>()
             .map_err(|_| ExportError::MetadataError("Failed to parse cpu_count".to_string()))
@@ -149,7 +154,12 @@ impl MetadataPort for MetadataAdapter {
             "BEGIN DBMS_PARALLEL_EXECUTE.CREATE_TASK(:1); END;",
             &[&task_name],
         )
-        .map_err(|e| ExportError::OracleError(format!("Failed to create parallel task '{}': {}", task_name, e)))?;
+        .map_err(|e| {
+            ExportError::OracleError(format!(
+                "Failed to create parallel task '{}': {}",
+                task_name, e
+            ))
+        })?;
 
         // Internal function to run the actual chunking logic.
         let run_plan = |conn: &oracle::Connection| -> Result<Vec<String>> {
@@ -176,18 +186,30 @@ impl MetadataPort for MetadataAdapter {
                     &blocks_per_chunk,
                 ],
             )
-            .map_err(|e| ExportError::OracleError(format!("Failed to create chunks for task '{}': {}", task_name, e)))?;
+            .map_err(|e| {
+                ExportError::OracleError(format!(
+                    "Failed to create chunks for task '{}': {}",
+                    task_name, e
+                ))
+            })?;
 
             // Fetch the calculated ROWID ranges.
-            let rows = conn
-                .query(SQL_FETCH_CHUNKS, &[&task_name])
-                .map_err(|e| ExportError::OracleError(format!("Failed to fetch chunks for task '{}': {}", task_name, e)))?;
-            
+            let rows = conn.query(SQL_FETCH_CHUNKS, &[&task_name]).map_err(|e| {
+                ExportError::OracleError(format!(
+                    "Failed to fetch chunks for task '{}': {}",
+                    task_name, e
+                ))
+            })?;
+
             let mut chunks = Vec::new();
             for r in rows {
                 let row = r.map_err(|e| ExportError::OracleError(e.to_string()))?;
-                let start: String = row.get(0).map_err(|e| ExportError::OracleError(e.to_string()))?;
-                let end: String = row.get(1).map_err(|e| ExportError::OracleError(e.to_string()))?;
+                let start: String = row
+                    .get(0)
+                    .map_err(|e| ExportError::OracleError(e.to_string()))?;
+                let end: String = row
+                    .get(1)
+                    .map_err(|e| ExportError::OracleError(e.to_string()))?;
                 chunks.push(format!("ROWID BETWEEN '{}' AND '{}'", start, end));
             }
             Ok(chunks)
@@ -298,7 +320,10 @@ impl MetadataAdapter {
         }
 
         // Try USER_SEGMENTS (only works for current user).
-        if let Ok(mut rows) = conn.query("SELECT SUM(bytes) / 1024 / 1024 / 1024 FROM user_segments WHERE segment_name = :1", &[&table]) {
+        if let Ok(mut rows) = conn.query(
+            "SELECT SUM(bytes) / 1024 / 1024 / 1024 FROM user_segments WHERE segment_name = :1",
+            &[&table],
+        ) {
             if let Some(Ok(r)) = rows.next() {
                 if let Ok(Some(s)) = r.get::<usize, Option<f64>>(0) {
                     return Ok(s);
@@ -307,7 +332,10 @@ impl MetadataAdapter {
         }
 
         // Final fallback: Estimate size from table stats.
-        if let Ok(row) = conn.query_row("SELECT num_rows, avg_row_len FROM all_tables WHERE owner = :1 AND table_name = :2", &[&schema, &table]) {
+        if let Ok(row) = conn.query_row(
+            "SELECT num_rows, avg_row_len FROM all_tables WHERE owner = :1 AND table_name = :2",
+            &[&schema, &table],
+        ) {
             let num_rows: Option<u64> = row.get(0).unwrap_or(None);
             let avg_len: Option<u64> = row.get(1).unwrap_or(None);
             if let (Some(rows), Some(len)) = (num_rows, avg_len) {
@@ -367,7 +395,7 @@ impl MetadataAdapter {
         }
 
         // THE TRICK: We run a "SELECT ... WHERE 1=0" query.
-        // This doesn't return any rows, but it DOES return the "Column Info" 
+        // This doesn't return any rows, but it DOES return the "Column Info"
         // which tells us exactly what Oracle internal types these columns are.
         let quoted_names: Vec<String> = entries.iter().map(|e| format!("\"{}\"", e.name)).collect();
         let sql_dummy = format!(
@@ -461,23 +489,29 @@ pub fn get_virtual_columns_map(
 ) -> std::collections::HashMap<String, String> {
     let sql = "SELECT column_name, data_default FROM all_tab_cols WHERE owner = :1 AND table_name = :2 AND virtual_column = 'YES'";
     let mut map = std::collections::HashMap::new();
-    
+
     // Explicitly set log level to debug for this discovery step
-    debug!("Fetching virtual column expressions for {}.{}", schema, table);
-    
+    debug!(
+        "Fetching virtual column expressions for {}.{}",
+        schema, table
+    );
+
     match conn.query(sql, &[&schema.to_uppercase(), &table.to_uppercase()]) {
         Ok(rows) => {
             for row_res in rows {
                 match row_res {
                     Ok(row) => {
                         let name: String = row.get(0).unwrap_or_default();
-                        let expr: Option<String> = row.get(1).map_err(|e| {
-                            warn!("Failed to fetch DATA_DEFAULT for {}.{}: {}", table, name, e);
-                            e
-                        }).unwrap_or(None);
+                        let expr: Option<String> = row
+                            .get(1)
+                            .map_err(|e| {
+                                warn!("Failed to fetch DATA_DEFAULT for {}.{}: {}", table, name, e);
+                                e
+                            })
+                            .unwrap_or(None);
 
                         if let Some(e) = expr {
-                            // OCI default buffer for LONG is often 32KB. 
+                            // OCI default buffer for LONG is often 32KB.
                             // If exactly matching or very close, warn about potential truncation.
                             if e.len() >= 32760 {
                                 warn!("Virtual column expression for {}.{} is very long ({} bytes). It might be truncated.", 
@@ -485,12 +519,15 @@ pub fn get_virtual_columns_map(
                             }
                             map.insert(name.to_uppercase(), e.trim().to_string());
                         }
-                    },
+                    }
                     Err(e) => warn!("Error iteration over virtual columns: {}", e),
                 }
             }
-        },
-        Err(e) => warn!("Failed to query virtual columns for {}.{}: {}", schema, table, e),
+        }
+        Err(e) => warn!(
+            "Failed to query virtual columns for {}.{}: {}",
+            schema, table, e
+        ),
     }
     map
 }

@@ -1,11 +1,11 @@
 //! # Export Orchestrator
 //!
-//! The Orchestrator is the "Brain" of the application. 
+//! The Orchestrator is the "Brain" of the application.
 //!
-//! In **Hexagonal Architecture**, the Orchestrator lives in the "Domain" or "Application" 
-//! layer. It knows the **business process** (how to export a table), but it 
-//! doesn't know the **technical details** (how to talk to Oracle or how to write 
-//! a Parquet file). 
+//! In **Hexagonal Architecture**, the Orchestrator lives in the "Domain" or "Application"
+//! layer. It knows the **business process** (how to export a table), but it
+//! doesn't know the **technical details** (how to talk to Oracle or how to write
+//! a Parquet file).
 //!
 //! It communicates with the outside world through **Ports** (interfaces):
 //! - `MetadataPort`: To ask "what tables exist?" and "what columns does this table have?"
@@ -13,12 +13,12 @@
 //! - `ArtifactPort`: To say "generate the BigQuery schema for this table."
 
 use crate::config::AppConfig as Config;
-use crate::domain::errors::Result;
 use crate::domain::entities::{ExportTask, FileFormat, TaskResult};
+use crate::domain::errors::Result;
 use crate::ports::artifact_port::ArtifactPort;
 use crate::ports::extraction_port::ExtractionPort;
 use crate::ports::metadata_port::MetadataPort;
-use log::{error, info};
+use log::info;
 use rayon::prelude::*;
 use serde_json::json;
 use std::sync::Arc;
@@ -28,7 +28,7 @@ use std::time::Instant;
 pub struct Orchestrator {
     // We use `Arc<dyn ...>` to hold our ports.
     // - `Arc`: safe to share across threads.
-    // - `dyn`: stands for "Dynamic". It means we can swap the implementation 
+    // - `dyn`: stands for "Dynamic". It means we can swap the implementation
     //   (e.g., use a `Mock` port during testing).
     metadata_port: Arc<dyn MetadataPort>,
     extraction_port: Arc<dyn ExtractionPort>,
@@ -74,7 +74,8 @@ impl Orchestrator {
 
         // --- STEP 2: FILTERING ---
         // We filter out tables that are explicitly excluded or not in the target list.
-        let eligible_tables: Vec<(String, String)> = all_tables.into_iter()
+        let eligible_tables: Vec<(String, String)> = all_tables
+            .into_iter()
             .filter(|(schema, table)| {
                 let t_up = table.to_uppercase();
                 if self.config.is_excluded(&t_up) {
@@ -96,7 +97,7 @@ impl Orchestrator {
         }
 
         // --- STEP 3: PARALLEL EXECUTION ---
-        // `.into_par_iter()` comes from the `rayon` crate. It automatically 
+        // `.into_par_iter()` comes from the `rayon` crate. It automatically
         // distributes the table exports across all available CPU threads.
         let results: Vec<TaskResult> = eligible_tables
             .into_par_iter()
@@ -138,9 +139,8 @@ impl Orchestrator {
         std::fs::create_dir_all(&self.config.export.output_dir)?;
         let file = std::fs::File::create(report_path)
             .map_err(crate::domain::errors::ExportError::IoError)?;
-        serde_json::to_writer_pretty(file, &report).map_err(|e| {
-            crate::domain::errors::ExportError::ArtifactError(e.to_string())
-        })?;
+        serde_json::to_writer_pretty(file, &report)
+            .map_err(|e| crate::domain::errors::ExportError::ArtifactError(e.to_string()))?;
 
         Ok(())
     }
@@ -160,23 +160,45 @@ impl Orchestrator {
         // --- STEP 1: METADATA ---
         let metadata = match self.metadata_port.get_table_metadata(schema, table) {
             Ok(m) => m,
-            Err(e) => return TaskResult::failure(schema.to_string(), table.to_string(), None, format!("Metadata failed: {:?}", e)),
+            Err(e) => {
+                return TaskResult::failure(
+                    schema.to_string(),
+                    table.to_string(),
+                    None,
+                    format!("Metadata failed: {:?}", e),
+                )
+            }
         };
 
         // --- STEP 2: SETUP ---
         let out_dir = format!("{}/{}/{}", self.config.export.output_dir, schema, table);
         let config_dir = format!("{}/config", out_dir);
         let data_dir = format!("{}/data", out_dir);
-        if let Err(e) = std::fs::create_dir_all(&config_dir).and_then(|_| std::fs::create_dir_all(&data_dir)) {
-            return TaskResult::failure(schema.to_string(), table.to_string(), None, format!("Dir creation failed: {:?}", e));
+        if let Err(e) =
+            std::fs::create_dir_all(&config_dir).and_then(|_| std::fs::create_dir_all(&data_dir))
+        {
+            return TaskResult::failure(
+                schema.to_string(),
+                table.to_string(),
+                None,
+                format!("Dir creation failed: {:?}", e),
+            );
         }
 
         let enable_row_hash = self.config.export.enable_row_hash.unwrap_or(false);
         let file_format = self.config.export.file_format.unwrap_or(FileFormat::Csv);
-        
+
         // --- STEP 3: ARTIFACTS ---
-        if let Err(e) = self.artifact_port.write_artifacts(&metadata, &config_dir, enable_row_hash, file_format) {
-            return TaskResult::failure(schema.to_string(), table.to_string(), None, format!("Artifacts failed: {:?}", e));
+        if let Err(e) =
+            self.artifact_port
+                .write_artifacts(&metadata, &config_dir, enable_row_hash, file_format)
+        {
+            return TaskResult::failure(
+                schema.to_string(),
+                table.to_string(),
+                None,
+                format!("Artifacts failed: {:?}", e),
+            );
         }
 
         let extension = match file_format {
@@ -189,7 +211,9 @@ impl Orchestrator {
         // we split the table into "chunks" using Oracle ROWID ranges.
         let parallel = self.config.export.parallel.unwrap_or(1);
         let chunks = if parallel > 1 && metadata.size_gb > 1.0 {
-            self.metadata_port.generate_table_chunks(schema, table, parallel).unwrap_or_default()
+            self.metadata_port
+                .generate_table_chunks(schema, table, parallel)
+                .unwrap_or_default()
         } else {
             vec![]
         };
@@ -211,18 +235,22 @@ impl Orchestrator {
             }]
         } else {
             // MULTI-CHUNK: Each chunk has a unique ROWID range in the WHERE clause.
-            chunks.into_iter().enumerate().map(|(i, where_clause)| ExportTask {
-                schema: schema.to_string(),
-                table: table.to_string(),
-                chunk_id: Some(i as u32),
-                query_where: Some(where_clause),
-                output_file: format!("{}/data_chunk_{:04}.{}", data_dir, i, extension),
-                enable_row_hash,
-                use_client_hash: self.config.export.use_client_hash.unwrap_or(false),
-                file_format,
-                parquet_compression: self.config.export.parquet_compression.clone(),
-                parquet_batch_size: self.config.export.parquet_batch_size,
-            }).collect()
+            chunks
+                .into_iter()
+                .enumerate()
+                .map(|(i, where_clause)| ExportTask {
+                    schema: schema.to_string(),
+                    table: table.to_string(),
+                    chunk_id: Some(i as u32),
+                    query_where: Some(where_clause),
+                    output_file: format!("{}/data_chunk_{:04}.{}", data_dir, i, extension),
+                    enable_row_hash,
+                    use_client_hash: self.config.export.use_client_hash.unwrap_or(false),
+                    file_format,
+                    parquet_compression: self.config.export.parquet_compression.clone(),
+                    parquet_batch_size: self.config.export.parquet_batch_size,
+                })
+                .collect()
         };
 
         if tasks.len() > 1 {
@@ -231,11 +259,22 @@ impl Orchestrator {
 
         // --- STEP 5: EXECUTION ---
         // We use rayons `into_par_iter()` again here!
-        // This is "Nested Parallelism": multiple tables in parallel, and chunks 
+        // This is "Nested Parallelism": multiple tables in parallel, and chunks
         // within a table in parallel.
-        let results: Vec<TaskResult> = tasks.into_par_iter()
-            .map(|task| self.extraction_port.export_task(task, &metadata)
-                .unwrap_or_else(|e| TaskResult::failure(schema.to_string(), table.to_string(), None, format!("{:?}", e))))
+        let results: Vec<TaskResult> = tasks
+            .into_par_iter()
+            .map(|task| {
+                self.extraction_port
+                    .export_task(task, &metadata)
+                    .unwrap_or_else(|e| {
+                        TaskResult::failure(
+                            schema.to_string(),
+                            table.to_string(),
+                            None,
+                            format!("{:?}", e),
+                        )
+                    })
+            })
             .collect();
 
         // --- STEP 6: AGGREGATION ---
@@ -263,9 +302,26 @@ impl Orchestrator {
         }
 
         if errors.is_empty() {
-            TaskResult::success(schema.to_string(), table.to_string(), total_rows, total_bytes, max_duration, None)
+            TaskResult::success(
+                schema.to_string(),
+                table.to_string(),
+                total_rows,
+                total_bytes,
+                max_duration,
+                None,
+            )
         } else {
-            TaskResult::failure(schema.to_string(), table.to_string(), None, errors.iter().filter(|e| !e.is_empty()).cloned().collect::<Vec<_>>().join("; "))
+            TaskResult::failure(
+                schema.to_string(),
+                table.to_string(),
+                None,
+                errors
+                    .iter()
+                    .filter(|e| !e.is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            )
         }
     }
 }
@@ -429,11 +485,9 @@ mod tests {
         struct FailingMetadataPort;
         impl MetadataPort for FailingMetadataPort {
             fn get_tables(&self, _schema: &str) -> Result<Vec<String>> {
-                Err(
-                    crate::domain::errors::ExportError::ArtifactError(
-                        "DB Down".to_string(),
-                    ),
-                )
+                Err(crate::domain::errors::ExportError::ArtifactError(
+                    "DB Down".to_string(),
+                ))
             }
             fn get_table_metadata(&self, _schema: &str, _table: &str) -> Result<TableMetadata> {
                 unreachable!()

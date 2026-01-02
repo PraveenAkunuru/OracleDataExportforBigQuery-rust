@@ -2,9 +2,9 @@
 //!
 //! In Hexagonal Architecture, a **Port** is like a "Slot" or a "Contract".
 //!
-//! This Port defines what it means to "read metadata" from a database. 
-//! It doesn't care IF the database is Oracle, PostgreSQL, or even a Mock 
-//! for testing. Any struct that implements the `MetadataPort` trait can 
+//! This Port defines what it means to "read metadata" from a database.
+//! It doesn't care IF the database is Oracle, PostgreSQL, or even a Mock
+//! for testing. Any struct that implements the `MetadataPort` trait can
 //! be used by the Orchestrator.
 
 use crate::domain::entities::{TableMetadata, ValidationStats};
@@ -12,7 +12,7 @@ use crate::domain::errors::Result;
 
 /// `MetadataPort` is a **Trait**. Think of it as an Interface.
 ///
-/// We add `: Send + Sync` here. This is a Rust requirement for types 
+/// We add `: Send + Sync` here. This is a Rust requirement for types
 /// that are shared across multiple threads.
 /// - `Send`: safe to send to another thread.
 /// - `Sync`: safe to access from multiple threads at the same time.

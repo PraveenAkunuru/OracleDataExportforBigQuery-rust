@@ -1,10 +1,10 @@
 //! # Domain Entities
 //!
-//! Entities are the "Nouns" of our application. They are simple data structures 
-//! (structs) that represent the things we are working with: Tables, Columns, 
+//! Entities are the "Nouns" of our application. They are simple data structures
+//! (structs) that represent the things we are working with: Tables, Columns,
 //! Tasks, and Results.
 //!
-//! We use the `serde` crate (Serialize/Deserialize) to allow these structs 
+//! We use the `serde` crate (Serialize/Deserialize) to allow these structs
 //! to be easily converted to/from JSON or YAML.
 
 use serde::{Deserialize, Serialize};
@@ -132,4 +132,21 @@ impl TaskResult {
             error: Some(error),
         }
     }
+}
+
+/// `ColumnAggregate` stores a validation metric (like SUM) for a column.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnAggregate {
+    pub column_name: String,
+    pub agg_type: String,
+    pub value: String,
+}
+
+/// `ValidationStats` is used for data fidelity checks between Oracle and BigQuery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationStats {
+    pub table_name: String,
+    pub row_count: u64,
+    pub pk_hash: Option<String>,
+    pub aggregates: Option<Vec<ColumnAggregate>>,
 }

@@ -69,13 +69,25 @@ fn main() {
 
     // 2. Extraction Port: Handles the heavy lifting of streaming rows to disk.
     let prefetch = config.export.prefetch_rows.unwrap_or(5000);
-    let delimiter_str = config.export.field_delimiter.clone().unwrap_or_else(|| "\u{0010}".to_string());
+    let delimiter_str = config
+        .export
+        .field_delimiter
+        .clone()
+        .unwrap_or_else(|| "\u{0010}".to_string());
     let field_delimiter = delimiter_str.as_bytes()[0];
     let extraction_port = Arc::new(Extractor::new(runtime.pool, prefetch, field_delimiter));
 
     // 3. Artifact Port: Generates BigQuery DDL and load scripts.
-    let project_id = config.bigquery.as_ref().map(|b| b.project.clone()).unwrap_or_else(|| "PRJ".to_string());
-    let dataset_id = config.bigquery.as_ref().map(|b| b.dataset.clone()).unwrap_or_else(|| "DS".to_string());
+    let project_id = config
+        .bigquery
+        .as_ref()
+        .map(|b| b.project.clone())
+        .unwrap_or_else(|| "PRJ".to_string());
+    let dataset_id = config
+        .bigquery
+        .as_ref()
+        .map(|b| b.dataset.clone())
+        .unwrap_or_else(|| "DS".to_string());
     let artifact_port = Arc::new(ArtifactAdapter::new(project_id, dataset_id));
 
     // --- STEP 4: ORCHESTRATION ---
@@ -87,7 +99,11 @@ fn main() {
     match orchestrator.run() {
         Ok(results) => {
             let success_count = results.iter().filter(|r| r.status == "SUCCESS").count();
-            info!("Export finished. {}/{} tables successful.", success_count, results.len());
+            info!(
+                "Export finished. {}/{} tables successful.",
+                success_count,
+                results.len()
+            );
         }
         Err(e) => {
             error!("Orchestrator failed: {:?}", e);

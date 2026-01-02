@@ -2,7 +2,7 @@
 //!
 //! This Port defines the interface for creating "Sidecar" files.
 //!
-//! When we export data, we also need to generate the `CREATE TABLE` scripts 
+//! When we export data, we also need to generate the `CREATE TABLE` scripts
 //! for BigQuery so that the user can actually load the data.
 
 use crate::domain::entities::{FileFormat, TableMetadata};

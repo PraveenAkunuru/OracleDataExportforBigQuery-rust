@@ -25,7 +25,10 @@ pub struct ArtifactAdapter {
 
 impl ArtifactAdapter {
     pub fn new(project_id: String, dataset_id: String) -> Self {
-        Self { project_id, dataset_id }
+        Self {
+            project_id,
+            dataset_id,
+        }
     }
 
     /// Helper to write text to a file.
@@ -83,7 +86,7 @@ impl ArtifactPort for ArtifactAdapter {
         let load_cmd_path = config_path.join("load_command.sh");
         self.write_file(load_cmd_path.clone(), &load_cmd)
             .map_err(ExportError::IoError)?;
-        
+
         // Make the script executable on Linux/Mac.
         #[cfg(unix)]
         {
@@ -114,35 +117,77 @@ impl ArtifactAdapter {
     /// Generates optimized BigQuery DDL.
     fn generate_bq_ddl(&self, metadata: &TableMetadata, enable_row_hash: bool) -> String {
         let physical_name = format!("{}_PHYSICAL", metadata.table_name);
-        
+
         // Definitions for columns that actually exist on disk (no virtual columns).
-        let column_definitions = metadata.columns.iter()
+        let column_definitions = metadata
+            .columns
+            .iter()
             .filter(|c| !c.is_virtual)
             .map(|c| {
-                let desc = c.comment.as_ref().map(|cc| format!(" OPTIONS(description=\"{}\")", cc.replace("\"", "\\\""))).unwrap_or_default();
+                let desc = c
+                    .comment
+                    .as_ref()
+                    .map(|cc| format!(" OPTIONS(description=\"{}\")", cc.replace("\"", "\\\"")))
+                    .unwrap_or_default();
                 format!("  {} {}{}", c.name, c.bq_type, desc)
             })
-            .collect::<Vec<_>>().join(",\n");
+            .collect::<Vec<_>>()
+            .join(",\n");
 
-        let hash_column = if enable_row_hash { ",\n  ROW_HASH STRING NOT NULL OPTIONS(description=\"SHA256 hash for duplicate detection\")" } else { "" };
-        let primary_key = if !metadata.pk_cols.is_empty() { format!(",\n  PRIMARY KEY ({}) NOT ENFORCED", metadata.pk_cols.join(", ")) } else { "".to_string() };
+        let hash_column = if enable_row_hash {
+            ",\n  ROW_HASH STRING NOT NULL OPTIONS(description=\"SHA256 hash for duplicate detection\")"
+        } else {
+            ""
+        };
+        let primary_key = if !metadata.pk_cols.is_empty() {
+            format!(
+                ",\n  PRIMARY KEY ({}) NOT ENFORCED",
+                metadata.pk_cols.join(", ")
+            )
+        } else {
+            "".to_string()
+        };
 
         // Handle Partitioning (BigQuery's way of splitting data by day/month).
-        let partitioning = metadata.columns.iter()
-            .find(|c| metadata.partition_cols.contains(&c.name) && (c.bq_type.contains("DATE") || c.bq_type.contains("TIMESTAMP")))
-            .map(|c| format!("PARTITION BY {}", c.name)).unwrap_or_default();
+        let partitioning = metadata
+            .columns
+            .iter()
+            .find(|c| {
+                metadata.partition_cols.contains(&c.name)
+                    && (c.bq_type.contains("DATE") || c.bq_type.contains("TIMESTAMP"))
+            })
+            .map(|c| format!("PARTITION BY {}", c.name))
+            .unwrap_or_default();
 
         // Handle Clustering (BigQuery's way of sorting data for faster searches).
         let mut cluster_cols = metadata.pk_cols.clone();
-        for idx in &metadata.index_cols { if !cluster_cols.contains(idx) { cluster_cols.push(idx.clone()); } }
+        for idx in &metadata.index_cols {
+            if !cluster_cols.contains(idx) {
+                cluster_cols.push(idx.clone());
+            }
+        }
         let clustering = if !cluster_cols.is_empty() {
-            format!("CLUSTER BY {}", cluster_cols[0..std::cmp::min(4, cluster_cols.len())].join(", "))
-        } else { "".to_string() };
+            format!(
+                "CLUSTER BY {}",
+                cluster_cols[0..std::cmp::min(4, cluster_cols.len())].join(", ")
+            )
+        } else {
+            "".to_string()
+        };
 
         // The View includes all columns + any virtual column logic.
-        let view_columns = metadata.columns.iter()
-            .map(|c| if c.is_virtual { format!("  CAST(`{}` AS STRING) AS {}", c.name, c.name) } else { format!("  {}", c.name) })
-            .collect::<Vec<_>>().join(",\n");
+        let view_columns = metadata
+            .columns
+            .iter()
+            .map(|c| {
+                if c.is_virtual {
+                    format!("  CAST(`{}` AS STRING) AS {}", c.name, c.name)
+                } else {
+                    format!("  {}", c.name)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",\n");
         let view_hash = if enable_row_hash { ",\n  ROW_HASH" } else { "" };
 
         DDL_TEMPLATE
@@ -160,7 +205,11 @@ impl ArtifactAdapter {
     }
 
     /// Generates BigQuery Schema JSON.
-    fn generate_schema_json(&self, metadata: &TableMetadata, enable_row_hash: bool) -> serde_json::Value {
+    fn generate_schema_json(
+        &self,
+        metadata: &TableMetadata,
+        enable_row_hash: bool,
+    ) -> serde_json::Value {
         let mut fields: Vec<_> = metadata.columns.iter()
             .filter(|c| !c.is_virtual)
             .map(|c| json!({"name": c.name, "type": c.bq_type, "mode": "NULLABLE", "description": c.comment}))
@@ -174,7 +223,11 @@ impl ArtifactAdapter {
     /// Generates a bash script with the `bq load` command.
     fn generate_load_command(&self, metadata: &TableMetadata, file_format: FileFormat) -> String {
         let (fmt, args, ext) = match file_format {
-            FileFormat::Csv => ("CSV", "--field_delimiter=$'\\x10' --skip_leading_rows=1 --null_marker=''", "*.csv.gz"),
+            FileFormat::Csv => (
+                "CSV",
+                "--field_delimiter=$'\\x10' --skip_leading_rows=1 --null_marker=''",
+                "*.csv.gz",
+            ),
             FileFormat::Parquet => ("PARQUET", "", "*.parquet"),
         };
         format!(

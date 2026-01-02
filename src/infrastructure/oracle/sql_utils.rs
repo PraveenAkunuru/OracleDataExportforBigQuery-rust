@@ -130,7 +130,10 @@ pub fn build_export_query(
             .iter()
             .filter_map(|c| get_hash_expr_from_str(&c.name, &c.raw_type))
             .collect();
-        select_list.push(format!("{} AS ROW_HASH", build_hash_from_parts(&hash_parts)));
+        select_list.push(format!(
+            "{} AS ROW_HASH",
+            build_hash_from_parts(&hash_parts)
+        ));
     }
 
     let mut sql = format!(
