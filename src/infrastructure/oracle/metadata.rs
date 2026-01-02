@@ -1,35 +1,33 @@
 //! Infrastructure adapter for reading Oracle schema metadata and calculating chunks.
 
-use crate::domain::bq_type_mapper;
-use crate::domain::error_definitions::{ExportError, Result};
-use crate::domain::export_models::{ColumnMetadata, TableMetadata};
-use crate::ports::schema_reader::SchemaReader;
+use crate::domain::mapping;
+use crate::domain::errors::{ExportError, Result};
+use crate::domain::entities::{ColumnMetadata, TableMetadata};
+use crate::ports::metadata_port::MetadataPort;
 use log::{debug, info, warn};
 use oracle::Connection;
+use r2d2::Pool;
+use crate::infrastructure::oracle::connection_manager::OracleConnectionManager;
+use std::sync::Arc;
 
-/// Concrete implementation of `SchemaReader` for Oracle databases.
+/// Concrete implementation of `MetadataPort` for Oracle databases.
 ///
 /// This adapter uses standard Oracle system views and the `DBMS_PARALLEL_EXECUTE`
 /// package to discover schema information and plan parallel workloads.
-pub struct OracleMetadataAdapter {
-    conn_str: String,
-    user: String,
-    pass: String,
+pub struct MetadataAdapter {
+    pool: Arc<Pool<OracleConnectionManager>>,
 }
 
-impl OracleMetadataAdapter {
-    /// Creates a new OracleMetadataAdapter with connection details.
-    pub fn new(conn_str: String, user: String, pass: String) -> Self {
-        Self {
-            conn_str,
-            user,
-            pass,
-        }
+impl MetadataAdapter {
+    /// Creates a new MetadataAdapter with a shared connection pool.
+    pub fn new(pool: Arc<Pool<OracleConnectionManager>>) -> Self {
+        Self { pool }
     }
 
-    /// Establishes a fresh connection to the Oracle database.
-    fn get_conn(&self) -> Result<Connection> {
-        Connection::connect(&self.user, &self.pass, &self.conn_str).map_err(ExportError::from)
+    /// Obtains a connection from the pool.
+    fn get_conn(&self) -> Result<r2d2::PooledConnection<OracleConnectionManager>> {
+        self.pool.get()
+            .map_err(|e| ExportError::OracleError(format!("Failed to get connection from pool: {}", e)))
     }
 }
 
@@ -76,16 +74,16 @@ const SQL_GET_INDEXES: &str = "
     ORDER BY index_name, column_position
 ";
 
-impl SchemaReader for OracleMetadataAdapter {
+impl MetadataPort for MetadataAdapter {
     fn get_tables(&self, schema_name: &str) -> Result<Vec<String>> {
         let conn = self.get_conn()?;
         let rows = conn
             .query(SQL_LIST_TABLES, &[&schema_name.to_uppercase()])
-            .map_err(ExportError::from)?;
+            .map_err(|e| ExportError::OracleError(e.to_string()))?;
         let mut tables = Vec::new();
         for row_result in rows {
-            let row = row_result.map_err(ExportError::from)?;
-            let name: String = row.get(0).map_err(ExportError::from)?;
+            let row = row_result.map_err(|e| ExportError::OracleError(e.to_string()))?;
+            let name: String = row.get(0).map_err(|e| ExportError::OracleError(e.to_string()))?;
             tables.push(name);
         }
         Ok(tables)
@@ -120,8 +118,8 @@ impl SchemaReader for OracleMetadataAdapter {
                 "SELECT value FROM v$parameter WHERE name = 'cpu_count'",
                 &[],
             )
-            .map_err(ExportError::from)?;
-        let count_str: String = row.get(0).map_err(ExportError::from)?;
+            .map_err(|e| ExportError::OracleError(e.to_string()))?;
+        let count_str: String = row.get(0).map_err(|e| ExportError::OracleError(e.to_string()))?;
         count_str
             .parse::<usize>()
             .map_err(|_| ExportError::MetadataError("Failed to parse cpu_count".to_string()))
@@ -144,46 +142,57 @@ impl SchemaReader for OracleMetadataAdapter {
             "BEGIN DBMS_PARALLEL_EXECUTE.CREATE_TASK(:1); END;",
             &[&task_name],
         )
-        .map_err(ExportError::from)?;
+        .map_err(|e| ExportError::OracleError(format!("Failed to create parallel task '{}': {}", task_name, e)))?;
 
-        let total_blocks: u64 = match conn.query_row(
-            SQL_TABLE_BLOCKS,
-            &[&schema.to_uppercase(), &table.to_uppercase()],
-        ) {
-            Ok(row) => row.get::<usize, u64>(0).unwrap_or(1000),
-            Err(_) => 1000,
+        // Use a closure or internal function to wrap the logic so we can always cleanup
+        let run_plan = |conn: &oracle::Connection| -> Result<Vec<String>> {
+            let total_blocks: u64 = match conn.query_row(
+                SQL_TABLE_BLOCKS,
+                &[&schema.to_uppercase(), &table.to_uppercase()],
+            ) {
+                Ok(row) => row.get::<usize, u64>(0).unwrap_or(1000),
+                Err(_) => 1000,
+            };
+
+            let blocks_per_chunk = (total_blocks as f64 / chunk_count as f64).ceil() as i64;
+            let blocks_per_chunk = std::cmp::max(1, blocks_per_chunk);
+
+            conn.execute(
+                "BEGIN DBMS_PARALLEL_EXECUTE.CREATE_CHUNKS_BY_ROWID(:1, :2, :3, FALSE, :4); END;",
+                &[
+                    &task_name,
+                    &schema.to_uppercase(),
+                    &table.to_uppercase(),
+                    &blocks_per_chunk,
+                ],
+            )
+            .map_err(|e| ExportError::OracleError(format!("Failed to create chunks for task '{}': {}", task_name, e)))?;
+
+            let rows = conn
+                .query(SQL_FETCH_CHUNKS, &[&task_name])
+                .map_err(|e| ExportError::OracleError(format!("Failed to fetch chunks for task '{}': {}", task_name, e)))?;
+            
+            let mut chunks = Vec::new();
+            for r in rows {
+                let row = r.map_err(|e| ExportError::OracleError(e.to_string()))?;
+                let start: String = row.get(0).map_err(|e| ExportError::OracleError(e.to_string()))?;
+                let end: String = row.get(1).map_err(|e| ExportError::OracleError(e.to_string()))?;
+                chunks.push(format!("ROWID BETWEEN '{}' AND '{}'", start, end));
+            }
+            Ok(chunks)
         };
 
-        let blocks_per_chunk = (total_blocks as f64 / chunk_count as f64).ceil() as i64;
-        let blocks_per_chunk = std::cmp::max(1, blocks_per_chunk);
+        let result = run_plan(&conn);
 
-        conn.execute(
-            "BEGIN DBMS_PARALLEL_EXECUTE.CREATE_CHUNKS_BY_ROWID(:1, :2, :3, FALSE, :4); END;",
-            &[
-                &task_name,
-                &schema.to_uppercase(),
-                &table.to_uppercase(),
-                &blocks_per_chunk,
-            ],
-        )
-        .map_err(ExportError::from)?;
-
-        let rows = conn
-            .query(SQL_FETCH_CHUNKS, &[&task_name])
-            .map_err(ExportError::from)?;
-        let mut chunks = Vec::new();
-        for r in rows {
-            let row = r.map_err(ExportError::from)?;
-            let start: String = row.get(0).map_err(ExportError::from)?;
-            let end: String = row.get(1).map_err(ExportError::from)?;
-            chunks.push(format!("ROWID BETWEEN '{}' AND '{}'", start, end));
-        }
-
-        let _ = conn.execute(
+        // Always attempt to drop the task
+        if let Err(e) = conn.execute(
             "BEGIN DBMS_PARALLEL_EXECUTE.DROP_TASK(:1); END;",
             &[&task_name],
-        );
-        Ok(chunks)
+        ) {
+            warn!("Failed to drop parallel task '{}': {}", task_name, e);
+        }
+
+        result
     }
 
     fn validate_table(
@@ -192,7 +201,7 @@ impl SchemaReader for OracleMetadataAdapter {
         table: &str,
         pk_cols: Option<&[String]>,
         agg_cols: Option<&[String]>,
-    ) -> Result<crate::domain::export_models::ValidationStats> {
+    ) -> Result<crate::domain::entities::ValidationStats> {
         let conn = self.get_conn()?;
         info!("Validating {}.{}", schema, table);
 
@@ -200,9 +209,9 @@ impl SchemaReader for OracleMetadataAdapter {
         let count_sql = format!("SELECT COUNT(*) FROM \"{}\".\"{}\"", schema, table);
         let row_count: u64 = conn
             .query_row(&count_sql, &[])
-            .map_err(ExportError::from)?
+            .map_err(|e| ExportError::OracleError(e.to_string()))?
             .get::<usize, u64>(0)
-            .map_err(ExportError::from)?;
+            .map_err(|e| ExportError::OracleError(e.to_string()))?;
 
         // Tier 2: PK Hash
         let mut pk_hash = None;
@@ -238,7 +247,7 @@ impl SchemaReader for OracleMetadataAdapter {
                 let agg_sql = format!("SELECT SUM(\"{}\") FROM \"{}\".\"{}\"", col, schema, table);
                 if let Ok(row) = conn.query_row(&agg_sql, &[]) {
                     if let Ok(Some(v)) = row.get::<usize, Option<String>>(0) {
-                        agg_results.push(crate::domain::export_models::ColumnAggregate {
+                        agg_results.push(crate::domain::entities::ColumnAggregate {
                             column_name: col.clone(),
                             agg_type: "SUM".to_string(),
                             value: v,
@@ -251,7 +260,7 @@ impl SchemaReader for OracleMetadataAdapter {
             }
         }
 
-        Ok(crate::domain::export_models::ValidationStats {
+        Ok(crate::domain::entities::ValidationStats {
             table_name: table.to_string(),
             row_count,
             pk_hash,
@@ -260,7 +269,7 @@ impl SchemaReader for OracleMetadataAdapter {
     }
 }
 
-impl OracleMetadataAdapter {
+impl MetadataAdapter {
     /// Queries the size of a table in Gigabytes using multiple fallback strategies.
     fn fetch_size(&self, conn: &Connection, schema: &str, table: &str) -> Result<f64> {
         let size_res = conn.query(SQL_SEGMENTS_SIZE, &[&schema, &table]);
@@ -369,7 +378,7 @@ impl OracleMetadataAdapter {
             final_cols.push(ColumnMetadata {
                 name: e.name.clone(),
                 raw_type: e.data_type.clone(),
-                bq_type: bq_type_mapper::map_oracle_to_bq(&otype, Some(&e.data_type)),
+                bq_type: mapping::map_oracle_to_bq(&otype, Some(&e.data_type)),
                 is_virtual: e.is_virtual,
                 is_hidden: e.is_hidden,
                 is_identity: e.is_identity,
@@ -435,14 +444,36 @@ pub fn get_virtual_columns_map(
 ) -> std::collections::HashMap<String, String> {
     let sql = "SELECT column_name, data_default FROM all_tab_cols WHERE owner = :1 AND table_name = :2 AND virtual_column = 'YES'";
     let mut map = std::collections::HashMap::new();
-    if let Ok(rows) = conn.query(sql, &[&schema.to_uppercase(), &table.to_uppercase()]) {
-        for row in rows.flatten() {
-            let name: String = row.get(0).unwrap_or_default();
-            let expr: Option<String> = row.get(1).unwrap_or(None);
-            if let Some(e) = expr {
-                map.insert(name.to_uppercase(), e);
+    
+    // Explicitly set log level to debug for this discovery step
+    debug!("Fetching virtual column expressions for {}.{}", schema, table);
+    
+    match conn.query(sql, &[&schema.to_uppercase(), &table.to_uppercase()]) {
+        Ok(rows) => {
+            for row_res in rows {
+                match row_res {
+                    Ok(row) => {
+                        let name: String = row.get(0).unwrap_or_default();
+                        let expr: Option<String> = row.get(1).map_err(|e| {
+                            warn!("Failed to fetch DATA_DEFAULT for {}.{}: {}", table, name, e);
+                            e
+                        }).unwrap_or(None);
+
+                        if let Some(e) = expr {
+                            // OCI default buffer for LONG is often 32KB. 
+                            // If exactly matching or very close, warn about potential truncation.
+                            if e.len() >= 32760 {
+                                warn!("Virtual column expression for {}.{} is very long ({} bytes). It might be truncated.", 
+                                    table, name, e.len());
+                            }
+                            map.insert(name.to_uppercase(), e.trim().to_string());
+                        }
+                    },
+                    Err(e) => warn!("Error iteration over virtual columns: {}", e),
+                }
             }
-        }
+        },
+        Err(e) => warn!("Failed to query virtual columns for {}.{}: {}", schema, table, e),
     }
     map
 }

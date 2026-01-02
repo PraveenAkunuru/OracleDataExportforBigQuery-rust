@@ -3,7 +3,7 @@
 //! Provides structures and logic to load configuration from YAML/JSON files,
 //! override with command-line arguments, and validate all parameters.
 
-use crate::domain::export_models::FileFormat;
+use crate::domain::entities::FileFormat;
 use clap::Parser;
 use serde::Deserialize;
 use std::error::Error;
@@ -96,6 +96,8 @@ pub struct ExportConfig {
     pub file_format: Option<FileFormat>,
     /// Compression for Parquet (default ZSTD)
     pub parquet_compression: Option<String>,
+    /// Number of rows to buffer before writing a Parquet/Arrow batch (default 10000)
+    pub parquet_batch_size: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -147,6 +149,18 @@ pub struct CliArgs {
     /// Parquet compression (zstd, snappy, gzip, lzo, brotli, lz4, none)
     #[arg(long)]
     pub compression: Option<String>,
+    /// Parquet batch size (rows per write)
+    #[arg(long)]
+    pub parquet_batch_size: Option<usize>,
+    /// Path to a file containing a list of schemas to export
+    #[arg(long)]
+    pub schemas_file: Option<String>,
+    /// Path to a file containing a list of tables to export
+    #[arg(long)]
+    pub tables_file: Option<String>,
+    /// Comma-separated list of tables to exclude
+    #[arg(long, value_delimiter = ',')]
+    pub exclude_tables: Option<Vec<String>>,
 }
 
 impl AppConfig {
@@ -205,6 +219,18 @@ impl AppConfig {
         }
         if let Some(c) = &args.compression {
             self.export.parquet_compression = Some(c.clone());
+        }
+        if let Some(b) = args.parquet_batch_size {
+            self.export.parquet_batch_size = Some(b);
+        }
+        if let Some(sf) = &args.schemas_file {
+            self.export.schemas_file = Some(sf.clone());
+        }
+        if let Some(tf) = &args.tables_file {
+            self.export.tables_file = Some(tf.clone());
+        }
+        if let Some(e) = &args.exclude_tables {
+            self.export.exclude_tables = Some(e.clone());
         }
     }
 
@@ -364,6 +390,7 @@ export:
                 target_throughput_per_core: None,
                 file_format: None,
                 parquet_compression: None,
+                parquet_batch_size: None,
             },
             bigquery: None,
             gcp: None,
@@ -384,6 +411,10 @@ export:
             cpu_percent: Some(80),
             format: None,
             compression: None,
+            parquet_batch_size: None,
+            schemas_file: None,
+            tables_file: None,
+            exclude_tables: None,
         };
 
         config.merge_cli(&args);

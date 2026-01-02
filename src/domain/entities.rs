@@ -108,6 +108,8 @@ pub struct ExportTask {
     pub file_format: FileFormat,
     /// Optional compression for Parquet (e.g., zstd, snappy).
     pub parquet_compression: Option<String>,
+    /// Optional batch size for Parquet (default 10000).
+    pub parquet_batch_size: Option<usize>,
 }
 
 /// Captures the outcome of an individual export task.

@@ -6,13 +6,16 @@ set -euo pipefail
 
 # Get the directory where the script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+PROJECT_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
 
 cd "$PROJECT_ROOT"
 
 echo "===================================================="
 echo "      Oracle Data Exporter - Test Suite             "
 echo "===================================================="
+
+# Set up Oracle Incident Client paths
+export LD_LIBRARY_PATH="$PROJECT_ROOT/lib/instantclient_19_10:$PROJECT_ROOT/lib:${LD_LIBRARY_PATH:-}"
 
 # 1. Build
 echo -e "\n[1/4] Building Project..."

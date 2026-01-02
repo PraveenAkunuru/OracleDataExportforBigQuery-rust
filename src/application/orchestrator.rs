@@ -4,11 +4,11 @@
 //! writer to discover tables, plan chunks, and aggregate results.
 
 use crate::config::AppConfig as Config;
-use crate::domain::error_definitions::Result;
-use crate::domain::export_models::{ExportTask, FileFormat, TaskResult};
-use crate::ports::artifact_writer::ArtifactWriter;
-use crate::ports::data_streamer::DataStreamer;
-use crate::ports::schema_reader::SchemaReader;
+use crate::domain::errors::Result;
+use crate::domain::entities::{ExportTask, FileFormat, TaskResult};
+use crate::ports::storage_port::StoragePort;
+use crate::ports::extraction_port::ExtractionPort;
+use crate::ports::metadata_port::MetadataPort;
 use log::{error, info};
 use rayon::prelude::*;
 use serde_json::json;
@@ -16,25 +16,25 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Orchestrates the end-to-end export of multiple Oracle schemas and tables.
-pub struct ExportOrchestrator {
-    schema_reader: Arc<dyn SchemaReader>,
-    data_streamer: Arc<dyn DataStreamer>,
-    artifact_writer: Arc<dyn ArtifactWriter>,
+pub struct Orchestrator {
+    metadata_port: Arc<dyn MetadataPort>,
+    extraction_port: Arc<dyn ExtractionPort>,
+    storage_port: Arc<dyn StoragePort>,
     config: Config,
 }
 
-impl ExportOrchestrator {
-    /// Creates a new ExportOrchestrator with the provided components.
+impl Orchestrator {
+    /// Creates a new Orchestrator with the provided components.
     pub fn new(
-        schema_reader: Arc<dyn SchemaReader>,
-        data_streamer: Arc<dyn DataStreamer>,
-        artifact_writer: Arc<dyn ArtifactWriter>,
+        metadata_port: Arc<dyn MetadataPort>,
+        extraction_port: Arc<dyn ExtractionPort>,
+        storage_port: Arc<dyn StoragePort>,
         config: Config,
     ) -> Self {
         Self {
-            schema_reader,
-            data_streamer,
-            artifact_writer,
+            metadata_port,
+            extraction_port,
+            storage_port,
             config,
         }
     }
@@ -52,7 +52,7 @@ impl ExportOrchestrator {
         let mut all_tables = Vec::new();
 
         for schema in schemas {
-            let db_tables = self.schema_reader.get_tables(&schema)?;
+            let db_tables = self.metadata_port.get_tables(&schema)?;
             for t in db_tables {
                 let t_up = t.to_uppercase();
                 if self.config.is_excluded(&t_up) {
@@ -118,9 +118,9 @@ impl ExportOrchestrator {
 
         std::fs::create_dir_all(&self.config.export.output_dir)?;
         let file = std::fs::File::create(report_path)
-            .map_err(crate::domain::error_definitions::ExportError::IoError)?;
+            .map_err(crate::domain::errors::ExportError::IoError)?;
         serde_json::to_writer_pretty(file, &report).map_err(|e| {
-            crate::domain::error_definitions::ExportError::ArtifactError(e.to_string())
+            crate::domain::errors::ExportError::ArtifactError(e.to_string())
         })?;
 
         Ok(())
@@ -133,7 +133,7 @@ impl ExportOrchestrator {
     fn process_table(&self, schema: &str, table: &str) -> Result<TaskResult> {
         info!("Processing {}.{}", schema, table);
 
-        let metadata = self.schema_reader.get_table_metadata(schema, table)?;
+        let metadata = self.metadata_port.get_table_metadata(schema, table)?;
 
         let out_dir = format!("{}/{}/{}", self.config.export.output_dir, schema, table);
         let config_dir = format!("{}/config", out_dir);
@@ -149,7 +149,7 @@ impl ExportOrchestrator {
             FileFormat::Parquet => "parquet",
         };
 
-        self.artifact_writer.write_artifacts(
+        self.storage_port.write_artifacts(
             &metadata,
             &config_dir,
             enable_row_hash,
@@ -162,7 +162,7 @@ impl ExportOrchestrator {
         let parallel = self.config.export.parallel.unwrap_or(1);
         if parallel > 1 && metadata.size_gb > 1.0 {
             let chunks = self
-                .schema_reader
+                .metadata_port
                 .generate_table_chunks(schema, table, parallel)?;
             if !chunks.is_empty() {
                 info!("Exporting {}.{} in {} chunks", schema, table, chunks.len());
@@ -181,8 +181,9 @@ impl ExportOrchestrator {
                             use_client_hash,
                             file_format,
                             parquet_compression: parquet_compression.clone(),
+                            parquet_batch_size: self.config.export.parquet_batch_size,
                         };
-                        match self.data_streamer.export_task(task) {
+                        match self.extraction_port.export_task(task) {
                             Ok(r) => r,
                             Err(e) => TaskResult::failure(
                                 schema.to_string(),
@@ -240,25 +241,26 @@ impl ExportOrchestrator {
             use_client_hash,
             file_format,
             parquet_compression,
+            parquet_batch_size: self.config.export.parquet_batch_size,
         };
 
-        self.data_streamer.export_task(task)
+        self.extraction_port.export_task(task)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::export_models::{
+    use crate::domain::entities::{
         ColumnMetadata, ExportTask, FileFormat, TableMetadata, TaskResult,
     };
-    use crate::ports::artifact_writer::ArtifactWriter;
-    use crate::ports::data_streamer::DataStreamer;
-    use crate::ports::schema_reader::SchemaReader;
+    use crate::ports::storage_port::StoragePort;
+    use crate::ports::extraction_port::ExtractionPort;
+    use crate::ports::metadata_port::MetadataPort;
     use std::sync::Arc;
 
-    struct MockSchemaReader;
-    impl SchemaReader for MockSchemaReader {
+    struct MockMetadataPort;
+    impl MetadataPort for MockMetadataPort {
         fn get_tables(&self, _schema: &str) -> Result<Vec<String>> {
             Ok(vec!["TABLE1".to_string()])
         }
@@ -298,8 +300,8 @@ mod tests {
             table: &str,
             _pk: Option<&[String]>,
             _agg: Option<&[String]>,
-        ) -> Result<crate::domain::export_models::ValidationStats> {
-            Ok(crate::domain::export_models::ValidationStats {
+        ) -> Result<crate::domain::entities::ValidationStats> {
+            Ok(crate::domain::entities::ValidationStats {
                 table_name: table.to_string(),
                 row_count: 100,
                 pk_hash: None,
@@ -308,8 +310,8 @@ mod tests {
         }
     }
 
-    struct MockDataStreamer;
-    impl DataStreamer for MockDataStreamer {
+    struct MockExtractionPort;
+    impl ExtractionPort for MockExtractionPort {
         fn export_task(&self, task: ExportTask) -> Result<TaskResult> {
             Ok(TaskResult::success(
                 task.schema,
@@ -322,8 +324,8 @@ mod tests {
         }
     }
 
-    struct MockArtifactWriter;
-    impl ArtifactWriter for MockArtifactWriter {
+    struct MockStoragePort;
+    impl StoragePort for MockStoragePort {
         fn write_artifacts(
             &self,
             _meta: &TableMetadata,
@@ -369,15 +371,16 @@ mod tests {
                 target_throughput_per_core: None,
                 file_format: None,
                 parquet_compression: None,
+                parquet_batch_size: None,
             },
             bigquery: None,
             gcp: None,
         };
 
-        let orchestrator = ExportOrchestrator::new(
-            Arc::new(MockSchemaReader),
-            Arc::new(MockDataStreamer),
-            Arc::new(MockArtifactWriter),
+        let orchestrator = Orchestrator::new(
+            Arc::new(MockMetadataPort),
+            Arc::new(MockExtractionPort),
+            Arc::new(MockStoragePort),
             config,
         );
 
@@ -400,11 +403,11 @@ mod tests {
 
     #[test]
     fn test_orchestrator_failure() {
-        struct FailingSchemaReader;
-        impl SchemaReader for FailingSchemaReader {
+        struct FailingMetadataPort;
+        impl MetadataPort for FailingMetadataPort {
             fn get_tables(&self, _schema: &str) -> Result<Vec<String>> {
                 Err(
-                    crate::domain::error_definitions::ExportError::ArtifactError(
+                    crate::domain::errors::ExportError::ArtifactError(
                         "DB Down".to_string(),
                     ),
                 )
@@ -429,7 +432,7 @@ mod tests {
                 _table: &str,
                 _pk: Option<&[String]>,
                 _agg: Option<&[String]>,
-            ) -> Result<crate::domain::export_models::ValidationStats> {
+            ) -> Result<crate::domain::entities::ValidationStats> {
                 unreachable!()
             }
         }
@@ -466,15 +469,16 @@ mod tests {
                 target_throughput_per_core: None,
                 file_format: None,
                 parquet_compression: None,
+                parquet_batch_size: None,
             },
             bigquery: None,
             gcp: None,
         };
 
-        let orchestrator = ExportOrchestrator::new(
-            Arc::new(FailingSchemaReader),
-            Arc::new(MockDataStreamer),
-            Arc::new(MockArtifactWriter),
+        let orchestrator = Orchestrator::new(
+            Arc::new(FailingMetadataPort),
+            Arc::new(MockExtractionPort),
+            Arc::new(MockStoragePort),
             config,
         );
 
@@ -516,15 +520,16 @@ mod tests {
                 target_throughput_per_core: None,
                 file_format: Some(FileFormat::Parquet),
                 parquet_compression: Some("zstd".into()),
+                parquet_batch_size: None,
             },
             bigquery: None,
             gcp: None,
         };
 
-        let orchestrator = ExportOrchestrator::new(
-            Arc::new(MockSchemaReader),
-            Arc::new(MockDataStreamer),
-            Arc::new(MockArtifactWriter),
+        let orchestrator = Orchestrator::new(
+            Arc::new(MockMetadataPort),
+            Arc::new(MockExtractionPort),
+            Arc::new(MockStoragePort),
             config,
         );
 
@@ -534,7 +539,7 @@ mod tests {
         assert_eq!(results[0].status, "SUCCESS");
 
         // Verify that Parquet files were "generated" (orchestrated)
-        // In our mock, DataStreamer doesn't actually create files,
+        // In our mock, ExtractionPort doesn't actually create files,
         // but Orchestrator would have created the directories.
         let data_dir = format!("{}/TEST/TABLE1/data", out_dir);
         assert!(std::path::Path::new(&data_dir).exists());

@@ -11,7 +11,7 @@ cd "$PROJECT_ROOT"
 export LD_LIBRARY_PATH="$PROJECT_ROOT/lib/instantclient_19_10:$PROJECT_ROOT/lib:${LD_LIBRARY_PATH:-}"
 export RUST_LOG=info
 
-CONFIG_FILE="tests/configs/integration/config_docker_test.yaml"
+CONFIG_FILE="tests/resources/configs/integration/config_docker_test.yaml"
 OUTPUT_DIR="./export_docker"
 
 echo "Running Oracle Data Exporter (Rust) with Docker Test Config..."

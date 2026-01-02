@@ -12,15 +12,17 @@ pub mod domain;
 pub mod infrastructure;
 pub mod ports;
 
-use crate::domain::export_models::FileFormat;
+use crate::domain::entities::FileFormat;
 
-use crate::application::export_orchestrator::ExportOrchestrator;
+use crate::application::orchestrator::Orchestrator;
 use crate::config::{AppConfig, CliArgs};
-use crate::infrastructure::local_storage::local_artifact_adapter::LocalArtifactAdapter;
-use crate::infrastructure::oracle::oracle_extraction_adapter::OracleExtractionAdapter;
-use crate::infrastructure::oracle::oracle_metadata_adapter::OracleMetadataAdapter;
+use crate::infrastructure::storage::fs_adapter::FsAdapter;
+use crate::infrastructure::oracle::extractor::Extractor;
+use crate::infrastructure::oracle::metadata::MetadataAdapter;
 use clap::Parser;
 use log::{error, info};
+use r2d2::Pool;
+use crate::infrastructure::oracle::connection_manager::OracleConnectionManager;
 use std::process;
 use std::sync::Arc;
 
@@ -74,7 +76,7 @@ fn main() {
             info!("Global thread pool already initialized: {}", e);
         });
 
-    // 4. Initialize Hexagonal Components
+    // 4. Initialize Connection Pool
     let conn_str = config.database.get_connection_string();
     let password = config
         .database
@@ -83,11 +85,25 @@ fn main() {
         .or_else(|| std::env::var("ORACLE_PASSWORD").ok())
         .unwrap_or_default();
 
-    let schema_reader = Arc::new(OracleMetadataAdapter::new(
-        conn_str.clone(),
-        config.database.username.clone(),
-        password.clone(),
-    ));
+    info!("Initializing connection pool for {}...", conn_str);
+    let manager = OracleConnectionManager::new(
+        &config.database.username,
+        &password,
+        &conn_str,
+    );
+    
+    // Pool size = num_threads + 2 (buffer for metadata queries)
+    let pool_size = (num_threads + 2) as u32;
+    let pool = Arc::new(Pool::builder()
+        .max_size(pool_size)
+        .build(manager)
+        .unwrap_or_else(|e| {
+            error!("Failed to create connection pool: {}", e);
+            process::exit(1);
+        }));
+
+    // 5. Initialize Hexagonal Components
+    let metadata_port = Arc::new(MetadataAdapter::new(pool.clone()));
 
     let prefetch = config.export.prefetch_rows.unwrap_or(5000);
     let delimiter_str = config
@@ -97,10 +113,8 @@ fn main() {
         .unwrap_or_else(|| "\u{0010}".to_string());
     let delimiter = delimiter_str.as_bytes()[0];
 
-    let data_streamer = Arc::new(OracleExtractionAdapter::new(
-        conn_str,
-        config.database.username.clone(),
-        password.clone(),
+    let extraction_port = Arc::new(Extractor::new(
+        pool,
         prefetch,
         delimiter,
     ));
@@ -117,11 +131,11 @@ fn main() {
         .map(|b| b.dataset.clone())
         .unwrap_or_else(|| "DS".to_string());
 
-    let artifact_writer = Arc::new(LocalArtifactAdapter::new(project_id, dataset_id));
+    let storage_port = Arc::new(FsAdapter::new(project_id, dataset_id));
 
     // 5. Run Orchestrator
     let orchestrator =
-        ExportOrchestrator::new(schema_reader, data_streamer, artifact_writer, config);
+        Orchestrator::new(metadata_port, extraction_port, storage_port, config);
 
     info!("Starting Export process...");
     match orchestrator.run() {
@@ -163,9 +177,9 @@ impl AppConfig {
                 cpu_percent: args.cpu_percent,
                 field_delimiter: None,
                 schemas: None,
-                schemas_file: None,
+                schemas_file: args.schemas_file.clone(),
                 tables: None,
-                tables_file: None,
+                tables_file: args.tables_file.clone(),
                 load_to_bq: Some(args.load),
                 use_client_hash: None,
                 adaptive_parallelism: None,
@@ -179,6 +193,7 @@ impl AppConfig {
                         _ => FileFormat::Csv,
                     }),
                 parquet_compression: args.compression.clone(),
+                parquet_batch_size: args.parquet_batch_size,
             },
             bigquery: None,
             gcp: None,

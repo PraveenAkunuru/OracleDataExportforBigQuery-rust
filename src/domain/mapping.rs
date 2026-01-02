@@ -4,6 +4,7 @@
 //! specialized types like XMLTYPE and SDO_GEOMETRY) into their BigQuery
 //! equivalents used in schema generation and DDL creation.
 
+use arrow_schema::DataType;
 use oracle::sql_type::OracleType;
 
 /// Maps an Oracle `sql_type::OracleType` and an optional raw type name to a BigQuery data type.
@@ -107,6 +108,71 @@ pub fn map_oracle_to_bq_ddl(oracle_type: &OracleType, raw_type: Option<&str>) ->
             }
         }
         t => map_oracle_to_bq(t, raw_type),
+    }
+}
+
+/// Maps an Oracle `sql_type::OracleType` and an optional raw type name to an Arrow `DataType`.
+pub fn map_oracle_to_arrow(oracle_type: &OracleType, raw_type: Option<&str>) -> DataType {
+    if let Some(r) = raw_type {
+        let upper = r.to_uppercase();
+        if upper.contains("XMLTYPE") || upper.contains("SDO_GEOMETRY") || upper.contains("UROWID") {
+            return DataType::Utf8;
+        }
+        if upper.contains("JSON") {
+            return DataType::Utf8; // or DataType::Utf8Json if supported, but Utf8 is safe
+        }
+        if upper.contains("BOOLEAN") {
+            return DataType::Boolean;
+        }
+    }
+
+    match oracle_type {
+        OracleType::Number(precision, scale) => {
+            if *scale == 0 {
+                if *precision > 0 && *precision <= 18 {
+                    DataType::Int64
+                } else {
+                    DataType::Utf8 // Fallback for very large integers as strings for now, or Decimal128
+                }
+            } else if *scale == -127 {
+                if *precision == 0 {
+                    DataType::Utf8 // Float as string fallback? No, let's use Float64 if possible
+                } else {
+                    DataType::Float64
+                }
+            } else {
+                // For decimals, we could use Decimal128, but Utf8 is safe for BQ parity if unsure.
+                // However, the review asks for native types.
+                let p = *precision;
+                let s = *scale;
+                if (1..=38).contains(&p) && (0..=38).contains(&s) {
+                    DataType::Decimal128(p, s)
+                } else {
+                    DataType::Utf8
+                }
+            }
+        }
+        OracleType::Int64 => DataType::Int64,
+        OracleType::Float(_) | OracleType::BinaryFloat | OracleType::BinaryDouble => {
+            DataType::Float64
+        }
+        OracleType::Char(_)
+        | OracleType::NChar(_)
+        | OracleType::Varchar2(_)
+        | OracleType::NVarchar2(_)
+        | OracleType::Long
+        | OracleType::CLOB
+        | OracleType::NCLOB
+        | OracleType::Rowid => DataType::Utf8,
+        OracleType::Date | OracleType::Timestamp(_) => {
+            DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None)
+        }
+        OracleType::TimestampTZ(_) | OracleType::TimestampLTZ(_) => {
+            DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, Some("UTC".into()))
+        }
+        OracleType::Boolean => DataType::Boolean,
+        OracleType::Raw(_) | OracleType::BLOB | OracleType::BFILE => DataType::Binary,
+        _ => DataType::Utf8,
     }
 }
 

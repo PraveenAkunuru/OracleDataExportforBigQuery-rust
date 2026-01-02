@@ -1,13 +1,13 @@
 //! Port defining the interface for reading database schema and metadata.
 
-use crate::domain::error_definitions::Result;
-use crate::domain::export_models::{TableMetadata, ValidationStats};
+use crate::domain::entities::{TableMetadata, ValidationStats};
+use crate::domain::errors::Result;
 
 /// A trait defining the capabilities required to discover and read database schemas.
 ///
 /// Implementers of this trait are responsible for querying the source database
 /// to retrieve lists of tables, column metadata, and chunking information.
-pub trait SchemaReader: Send + Sync {
+pub trait MetadataPort: Send + Sync {
     /// Retrieves a list of all table names available in the specified schema.
     fn get_tables(&self, schema: &str) -> Result<Vec<String>>;
 

@@ -1,3 +1,4 @@
-pub mod oracle_extraction_adapter;
-pub mod oracle_metadata_adapter;
+pub mod connection_manager;
+pub mod extractor;
+pub mod metadata;
 pub mod sql_utils;

@@ -1,25 +1,25 @@
 //! Infrastructure adapter for writing BigQuery and metadata artifacts to local storage.
 
-use crate::domain::error_definitions::{ExportError, Result};
-use crate::domain::export_models::{FileFormat, TableMetadata};
-use crate::ports::artifact_writer::ArtifactWriter;
+use crate::domain::errors::{ExportError, Result};
+use crate::domain::entities::{FileFormat, TableMetadata};
+use crate::ports::storage_port::StoragePort;
 // use log::{info, warn};
 use serde_json::json;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Concrete implementation of `ArtifactWriter` for local filesystem storage.
+/// Concrete implementation of `StoragePort` for local filesystem storage.
 ///
 /// This adapter generates all sidecar files required for BigQuery ingestion
 /// and operational validation, including DDL, JSON schemas, and load scripts.
-pub struct LocalArtifactAdapter {
+pub struct FsAdapter {
     project_id: String,
     dataset_id: String,
 }
 
-impl LocalArtifactAdapter {
-    /// Creates a new LocalArtifactAdapter with BigQuery destination context.
+impl FsAdapter {
+    /// Creates a new FsAdapter with BigQuery destination context.
     pub fn new(project_id: String, dataset_id: String) -> Self {
         Self {
             project_id,
@@ -35,7 +35,7 @@ impl LocalArtifactAdapter {
     }
 }
 
-impl ArtifactWriter for LocalArtifactAdapter {
+impl StoragePort for FsAdapter {
     fn write_artifacts(
         &self,
         metadata: &TableMetadata,
@@ -96,7 +96,7 @@ impl ArtifactWriter for LocalArtifactAdapter {
     }
 }
 
-impl LocalArtifactAdapter {
+impl FsAdapter {
     /// Generates BigQuery DDL (Physical Table + Logical View).
     fn generate_bq_ddl(&self, metadata: &TableMetadata, enable_row_hash: bool) -> String {
         let physical_name = format!("{}_PHYSICAL", metadata.table_name);
@@ -258,11 +258,11 @@ bq load --source_format=PARQUET --replace --schema=schema.json {}:{}.{}_PHYSICAL
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::export_models::ColumnMetadata;
+    use crate::domain::entities::ColumnMetadata;
 
     #[test]
     fn test_generate_schema_json() {
-        let adapter = LocalArtifactAdapter::new("p".into(), "d".into());
+        let adapter = FsAdapter::new("p".into(), "d".into());
         let meta = TableMetadata {
             schema: "S".into(),
             table_name: "T".into(),
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_generate_bq_ddl() {
-        let adapter = LocalArtifactAdapter::new("my-project".into(), "my-dataset".into());
+        let adapter = FsAdapter::new("my-project".into(), "my-dataset".into());
         let meta = TableMetadata {
             schema: "TEST".into(),
             table_name: "MY_TABLE".into(),
@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn test_generate_load_command() {
-        let adapter = LocalArtifactAdapter::new("p".into(), "d".into());
+        let adapter = FsAdapter::new("p".into(), "d".into());
         let meta = TableMetadata {
             schema: "S".into(),
             table_name: "T".into(),

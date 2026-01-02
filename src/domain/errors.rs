@@ -24,13 +24,19 @@ pub enum ExportError {
     IoError(#[from] std::io::Error),
 
     #[error("Oracle error: {0}")]
-    OracleError(#[from] oracle::Error),
+    OracleError(String),
 
     #[error("BigQuery error: {0}")]
     BigQueryError(String),
 
     #[error("Unknown error: {0}")]
     Unknown(String),
+}
+
+impl From<oracle::Error> for ExportError {
+    fn from(e: oracle::Error) -> Self {
+        ExportError::OracleError(e.to_string())
+    }
 }
 
 /// A specialized Result type for the Oracle Data Exporter.
