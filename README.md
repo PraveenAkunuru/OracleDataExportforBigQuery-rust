@@ -8,121 +8,132 @@ A high-performance, single-binary utility for migrating large-scale Oracle datab
 ## 🌟 Key Features
 
 *   **⚡ Blazing Fast Extraction**: Multi-threaded streaming from Oracle direct to Gzip-compressed CSV or Apache Parquet.
-*   **📦 Modern File Formats**: Full support for **Apache Parquet** with parameterized compression (ZSTD, Snappy, Gzip, LZ4).
-*   **🧩 Intelligent Parallel Chunking**: Automatically splits large tables (>1GB) into parallel chunks using `ROWID` ranges for maximum throughput.
-*   **🏗️ Hexagonal Architecture**: Clean separation of concerns between business logic and database infrastructure.
-*   **💎 Virtual Column Support**: Automatically handles Oracle virtual columns via a **Physical Table / Logical View split** in BigQuery.
-*   **🌍 Spatial Data Support**: Converts `SDO_GEOMETRY` to WKT/Geography automatically.
-*   **🛡️ Idempotency & Resiliency**: Built-in resume capability—already exported chunks are skipped automatically.
-*   **📊 Comprehensive Reporting**: Generates detailed JSON reports with MB/s, row counts, and error details.
-*   **⚙️ Adaptive Resource Management**: Throttles parallelism based on Oracle server CPU load or user-defined limits.
+*   **📦 Native Parquet Integration**: High-performance Oracle-to-Parquet export via native **Apache Arrow** builders.
+*   **🏊 Connection Pooling**: Integrated `r2d2` pooling for stable, high-throughput parallel sessions.
+*   **🧩 Intelligent Parallel Chunking**: Automatically splits large tables (>1GB) into parallel chunks using `ROWID` ranges.
+*   **🏗️ Certified Hexagonal Architecture**: Clean separation of concerns ensuring codebase maintainability and testability.
+*   **💎 Virtual Column Support**: Automatically re-implements Oracle virtual columns as **BigQuery Views**.
+*   **🛡️ Resilient Data Discovery**: Multi-layered fallback for table size discovery and `DATA_DEFAULT` truncation protection.
+*   **📊 Comprehensive Reporting**: Generates detailed JSON reports with MB/s, row counts, and data point validation.
+
+## 📈 Performance (Oracle 23c Free)
+
+*   **CSV (Gzip)**: **18.8 MB/s** (~63,000 rows/s)
+*   **Parquet**: **17.0 MB/s** (~26,000 rows/s)
 
 ---
 
 ## 🚀 Getting Started
 
-### Prerequisites
+### Quick Start (Development)
 
-*   **Oracle Instant Client**: The exporter requires Oracle shared libraries.
-*   **Network**: Access to the Oracle listener (usually port 1521).
-
-### Quick Start (Linux)
-
-1.  **Run with Wrapper Script**:
-    The provided `run.sh` automatically sets up `LD_LIBRARY_PATH`.
+1.  **Clone and Build**:
     ```bash
-    ./run.sh --username HR --password hr --host db-server --service ORCLPDB --table HR.EMPLOYEES --output ./output
+    cargo build --release
     ```
 
-2.  **Using a Config File (Recommended)**:
-    Create a `config.yaml`:
+2.  **Run with Native Client**:
+    Ensure `LD_LIBRARY_PATH` points to your Oracle Instant Client.
+    ```bash
+    ./target/release/oracle_rust_exporter --username HR --password hr --host db-server --service ORCLPDB --table HR.EMPLOYEES --output ./output
+    ```
+
+3.  **Using a Config File (Recommended)**:
+    Create a `config.yaml` (see `config.example.yaml` for a template):
     ```yaml
     database:
       username: "SYSTEM"
-      password: "*****"
+      password: "password"
       host: "localhost"
       port: 1521
       service: "FREEPDB1"
     export:
       output_dir: "./exports"
       schemas: ["HR", "SALES"]
-      cpu_percent: 80  # Use 80% of available CPU cores
+      parallel: 4
+      format: "parquet"
     ```
     Execute:
     ```bash
-    ./run.sh --config config.yaml
+    ./target/release/oracle_rust_exporter --config config.yaml
     ```
 
 ---
 
 ## 🛠️ Advanced Usage
 
-### 1. Table Filtering & Exclusion
-Filter tables directly in your config:
-```yaml
-export:
-  tables: ["EMPLOYEES", "DEPARTMENTS"] # Only these
-  exclude_tables: ["TEMP_LOGS", "BACKUP_%"] # Exclude these (supports globs)
-```
-
-### 2. Row Hashing (Data Integrity)
-Enable row-level hashing to detect duplicates or changes:
-```yaml
-export:
-  enable_row_hash: true
-  use_client_hash: true # Calculate hash in Rust (saves Oracle CPU)
-```
-
 ### Format & Compression
 | Argument | Description | Allowed Values |
 |----------|-------------|----------------|
-| `--format` | Output file format | `csv` (default), `parquet` |
-| `--compression` | Compression codec | `zstd` (default for Parquet), `snappy`, `gzip`, `lz4`, `none` |
+| `--format` | Output file format | `csv`, `parquet` |
+| `--compression` | Parquet compression | `snappy` (default), `zstd`, `gzip`, `lz4`, `none` |
+| `--parquet-batch-size` | Rows per Arrow batch | Default: 50,000 |
 
+### Resource Management
 | Argument | Description | Default |
 |----------|-------------|---------|
-| `--parallel` | Fixed number of threads | CPU count |
-| `--cpu-percent` | Percentage of host CPUs to use | 100 |
+| `--parallel` | Fixed number of threads | Automatic |
+| `--cpu-percent` | % of host CPUs to use | 100 |
 | `--prefetch-rows` | Rows to buffer from Oracle | 5000 |
+
+---
+
+## 📊 Data Type Mapping Reference
+
+The exporter performs high-fidelity type conversion to ensure Oracle data is represented correctly in BigQuery.
+
+| Oracle Type | BigQuery Type | Parquet/Arrow Type | Transformation / Logic |
+|:---|:---|:---|:---|
+| `NUMBER(P, 0)` (P ≤ 18) | `INT64` | `Int64` | Native integer mapping. |
+| `NUMBER(P, 0)` (P > 18) | `BIGNUMERIC` | `Decimal128` / `Utf8` | Handled as precision decimal or fallback string. |
+| `NUMBER(P, S)` | `BIGNUMERIC` | `Decimal128(P, S)` | Financial-grade decimal precision. |
+| `FLOAT`, `BINARY_DOUBLE` | `FLOAT64` | `Float64` | IEEE 754 floating point. |
+| `VARCHAR2`, `CLOB`, `LONG` | `STRING` | `Utf8` | UTF-8 encoded strings. |
+| `DATE`, `TIMESTAMP` | `DATETIME` | `Timestamp(Micro, None)` | Local calendar time (no offset). |
+| `TIMESTAMP WITH TZ` | `TIMESTAMP` | `Timestamp(Micro, UTC)` | Normalized to UTC. |
+| **`XMLTYPE`** | `STRING` | `Utf8` | Serialized to XML; newlines stripped for BQ. |
+| **`SDO_GEOMETRY`** | `GEOGRAPHY` (View) | `Utf8` | Converted to WKT via `SDO_UTIL`. |
+| **`JSON`** (Native) | `JSON` | `Utf8` | Native BigQuery JSON support. |
+| `BLOB`, `RAW`, `BFILE` | `BYTES` | `Binary` | Binary data retention. |
+| `BOOLEAN` | `BOOL` | `Boolean` | Native flag support. |
+| `INTERVAL` | `INTERVAL` | `Duration` / `Utf8` | BigQuery-native Interval support. |
 
 ---
 
 ## 🔍 Understanding the Artifacts
 
 For every table exported, the utility creates:
-1.  **`data/`**: Compressed `*.csv.gz` or `*.parquet` files (chunks).
+1.  **`data/`**: Compressed `*.csv.gz` or `*.parquet` files.
 2.  **`config/schema.json`**: BigQuery-compatible schema definition.
-3.  **`config/bigquery.ddl`**: SQL script to create the table and logical view.
-4.  **`config/load_command.sh`**: A ready-to-use `bq load` bash script (automatically configured for CSV or PARQUET).
-5.  **`config/metadata.json`**: Full technical details of the source table.
+3.  **`config/bigquery.ddl`**: SQL script for table and logical view creation.
+4.  **`config/load_command.sh`**: A ready-to-use `bq load` script.
+5.  **`config/metadata.json`**: Technical source metadata and validation stats.
 
 ---
 
 ## 🏗️ Architecture
 
 This project follows **Hexagonal Architecture**. 
--   **Domain**: Data types and mapping logic (`src/domain/`).
--   **Application**: The `ExportOrchestrator` (`src/application/`).
--   **Ports**: Trait interfaces for I/O (`src/ports/`).
--   **Infrastructure**: Concrete adapters for Oracle and Local Storage (`src/infrastructure/`).
+-   **Domain**: `src/domain/` (Entities and Mapping)
+-   **Application**: `src/application/` (Orchestration)
+-   **Ports**: `src/ports/` (Interfaces)
+-   **Infrastructure**: `src/infrastructure/` (Oracle and Storage Adapters)
 
-For more details, see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+See **[ARCHITECTURE.md](ARCHITECTURE.md)** for technical depth.
 
 ---
 
 ## 🧪 Testing
 
-We provide a comprehensive Docker-based integration suite.
+Run the full 360-degree integration suite (requires Docker):
 ```bash
-./run_docker_test.sh
+bash tests/scripts/run_all.sh
 ```
-This spawns a real Oracle 23c instance, populates complex types, and runs the full exporter suite.
 
 ---
 
 ## 📜 License
-Distributed under the MIT License. See `LICENSE` for more information.
+MIT License.
 
----
 **Maintained by**: Praveen Akunuru
-**Target**: Oracle 11g, 12c, 19c, 21c, 23c -> Google BigQuery
+**Target**: Oracle 11g+ -> Google BigQuery
