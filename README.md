@@ -38,7 +38,7 @@ A high-performance, single-binary utility for migrating large-scale Oracle datab
     ```yaml
     database:
       username: "SYSTEM"
-      password: "password"
+      password: "*****"
       host: "localhost"
       port: 1521
       service: "FREEPDB1"
