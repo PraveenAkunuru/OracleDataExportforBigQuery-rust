@@ -7,7 +7,8 @@ A high-performance, single-binary utility for migrating large-scale Oracle datab
 
 ## 🌟 Key Features
 
-*   **⚡ Blazing Fast Extraction**: Multi-threaded streaming from Oracle direct to Gzip-compressed CSV.
+*   **⚡ Blazing Fast Extraction**: Multi-threaded streaming from Oracle direct to Gzip-compressed CSV or Apache Parquet.
+*   **📦 Modern File Formats**: Full support for **Apache Parquet** with parameterized compression (ZSTD, Snappy, Gzip, LZ4).
 *   **🧩 Intelligent Parallel Chunking**: Automatically splits large tables (>1GB) into parallel chunks using `ROWID` ranges for maximum throughput.
 *   **🏗️ Hexagonal Architecture**: Clean separation of concerns between business logic and database infrastructure.
 *   **💎 Virtual Column Support**: Automatically handles Oracle virtual columns via a **Physical Table / Logical View split** in BigQuery.
@@ -72,11 +73,16 @@ export:
   use_client_hash: true # Calculate hash in Rust (saves Oracle CPU)
 ```
 
-### 3. Parallelism Tuning
+### Format & Compression
+| Argument | Description | Allowed Values |
+|----------|-------------|----------------|
+| `--format` | Output file format | `csv` (default), `parquet` |
+| `--compression` | Compression codec | `zstd` (default for Parquet), `snappy`, `gzip`, `lz4`, `none` |
+
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--parallel` | Fixed number of threads | CPU count |
-| `--cpu-percent` | Percentage of hosts CPUs to use | 100 |
+| `--cpu-percent` | Percentage of host CPUs to use | 100 |
 | `--prefetch-rows` | Rows to buffer from Oracle | 5000 |
 
 ---
@@ -84,10 +90,10 @@ export:
 ## 🔍 Understanding the Artifacts
 
 For every table exported, the utility creates:
-1.  **`data/`**: Compressed `*.csv.gz` files (chunks).
+1.  **`data/`**: Compressed `*.csv.gz` or `*.parquet` files (chunks).
 2.  **`config/schema.json`**: BigQuery-compatible schema definition.
 3.  **`config/bigquery.ddl`**: SQL script to create the table and logical view.
-4.  **`config/load_command.sh`**: A ready-to-use `bq load` bash script.
+4.  **`config/load_command.sh`**: A ready-to-use `bq load` bash script (automatically configured for CSV or PARQUET).
 5.  **`config/metadata.json`**: Full technical details of the source table.
 
 ---

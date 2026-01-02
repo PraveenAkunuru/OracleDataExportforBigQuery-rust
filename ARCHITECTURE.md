@@ -47,7 +47,8 @@ For tables larger than **1GB**, the exporter triggers a chunked export strategy:
 
 ### 2. Zero-Copy Streaming
 Data flow is designed to minimize memory overhead:
--   **Oracle Cursor** -> **Row Buffer** -> **CSV Formatter** -> **Gzip Encoder** -> **File Stream**.
+-   **CSV Flow**: Oracle Cursor -> Row Buffer -> CSV Formatter -> Gzip Encoder -> File Stream.
+-   **Parquet Flow**: Oracle Cursor -> Row Buffer (Batch) -> Arrow Array -> Parquet RowGroup -> File Stream.
 -   The application never loads a full table (or even a full chunk) into RAM.
 
 ### 3. Adaptive Parallelism
@@ -71,7 +72,7 @@ Spatial data is extracted using `SDO_UTIL.TO_WKTGEOMETRY(col)`.
 The generated BigQuery View casts the resulting string to the `GEOGRAPHY` type.
 
 ### Raw/Binary Data
-`BLOB` and `RAW` types are automatically encoded as **Base64** during extraction.
+`BLOB` and `RAW` types are automatically encoded as **Base64** during extraction when using CSV. In Parquet mode, they are handled as binary arrays.
 
 ---
 
