@@ -6,7 +6,7 @@
 use crate::config::AppConfig as Config;
 use crate::domain::errors::Result;
 use crate::domain::entities::{ExportTask, FileFormat, TaskResult};
-use crate::ports::storage_port::StoragePort;
+use crate::ports::artifact_port::ArtifactPort;
 use crate::ports::extraction_port::ExtractionPort;
 use crate::ports::metadata_port::MetadataPort;
 use log::{error, info};
@@ -19,7 +19,7 @@ use std::time::Instant;
 pub struct Orchestrator {
     metadata_port: Arc<dyn MetadataPort>,
     extraction_port: Arc<dyn ExtractionPort>,
-    storage_port: Arc<dyn StoragePort>,
+    artifact_port: Arc<dyn ArtifactPort>,
     config: Config,
 }
 
@@ -28,13 +28,13 @@ impl Orchestrator {
     pub fn new(
         metadata_port: Arc<dyn MetadataPort>,
         extraction_port: Arc<dyn ExtractionPort>,
-        storage_port: Arc<dyn StoragePort>,
+        artifact_port: Arc<dyn ArtifactPort>,
         config: Config,
     ) -> Self {
         Self {
             metadata_port,
             extraction_port,
-            storage_port,
+            artifact_port,
             config,
         }
     }
@@ -149,7 +149,7 @@ impl Orchestrator {
             FileFormat::Parquet => "parquet",
         };
 
-        self.storage_port.write_artifacts(
+        self.artifact_port.write_artifacts(
             &metadata,
             &config_dir,
             enable_row_hash,
@@ -254,7 +254,7 @@ mod tests {
     use crate::domain::entities::{
         ColumnMetadata, ExportTask, FileFormat, TableMetadata, TaskResult,
     };
-    use crate::ports::storage_port::StoragePort;
+    use crate::ports::artifact_port::ArtifactPort;
     use crate::ports::extraction_port::ExtractionPort;
     use crate::ports::metadata_port::MetadataPort;
     use std::sync::Arc;
@@ -324,8 +324,8 @@ mod tests {
         }
     }
 
-    struct MockStoragePort;
-    impl StoragePort for MockStoragePort {
+    struct MockArtifactPort;
+    impl ArtifactPort for MockArtifactPort {
         fn write_artifacts(
             &self,
             _meta: &TableMetadata,
@@ -377,10 +377,11 @@ mod tests {
             gcp: None,
         };
 
+        let artifact_port = Arc::new(MockArtifactPort);
         let orchestrator = Orchestrator::new(
             Arc::new(MockMetadataPort),
             Arc::new(MockExtractionPort),
-            Arc::new(MockStoragePort),
+            artifact_port,
             config,
         );
 
@@ -475,10 +476,11 @@ mod tests {
             gcp: None,
         };
 
+        let artifact_port = Arc::new(MockArtifactPort);
         let orchestrator = Orchestrator::new(
             Arc::new(FailingMetadataPort),
             Arc::new(MockExtractionPort),
-            Arc::new(MockStoragePort),
+            artifact_port,
             config,
         );
 
@@ -526,10 +528,11 @@ mod tests {
             gcp: None,
         };
 
+        let artifact_port = Arc::new(MockArtifactPort);
         let orchestrator = Orchestrator::new(
             Arc::new(MockMetadataPort),
             Arc::new(MockExtractionPort),
-            Arc::new(MockStoragePort),
+            artifact_port,
             config,
         );
 

@@ -12,11 +12,10 @@ pub mod domain;
 pub mod infrastructure;
 pub mod ports;
 
-use crate::domain::entities::FileFormat;
 
 use crate::application::orchestrator::Orchestrator;
 use crate::config::{AppConfig, CliArgs};
-use crate::infrastructure::storage::fs_adapter::FsAdapter;
+use crate::infrastructure::artifacts::artifact_adapter::ArtifactAdapter;
 use crate::infrastructure::oracle::extractor::Extractor;
 use crate::infrastructure::oracle::metadata::MetadataAdapter;
 use clap::Parser;
@@ -111,12 +110,12 @@ fn main() {
         .field_delimiter
         .clone()
         .unwrap_or_else(|| "\u{0010}".to_string());
-    let delimiter = delimiter_str.as_bytes()[0];
+    let field_delimiter = delimiter_str.as_bytes()[0];
 
     let extraction_port = Arc::new(Extractor::new(
         pool,
         prefetch,
-        delimiter,
+        field_delimiter,
     ));
 
     // For local artifacts, we need project/dataset
@@ -131,11 +130,11 @@ fn main() {
         .map(|b| b.dataset.clone())
         .unwrap_or_else(|| "DS".to_string());
 
-    let storage_port = Arc::new(FsAdapter::new(project_id, dataset_id));
+    let artifact_port = Arc::new(ArtifactAdapter::new(project_id, dataset_id));
 
     // 5. Run Orchestrator
     let orchestrator =
-        Orchestrator::new(metadata_port, extraction_port, storage_port, config);
+        Orchestrator::new(metadata_port, extraction_port, artifact_port, config);
 
     info!("Starting Export process...");
     match orchestrator.run() {
@@ -150,53 +149,6 @@ fn main() {
         Err(e) => {
             error!("Orchestrator failed: {:?}", e);
             process::exit(1);
-        }
-    }
-}
-
-// Add a helper to AppConfig to create a default from CLI
-impl AppConfig {
-    fn default_from_cli(args: &CliArgs) -> Self {
-        Self {
-            database: crate::config::DatabaseConfig {
-                username: args.username.clone().unwrap_or_default(),
-                password: args.password.clone(),
-                host: args.host.clone().unwrap_or_default(),
-                port: args.port.unwrap_or(1521),
-                service: args.service.clone().unwrap_or_default(),
-                connection_string: None,
-            },
-            export: crate::config::ExportConfig {
-                output_dir: args.output.clone().unwrap_or_else(|| ".".to_string()),
-                schema: None,
-                table: args.table.clone(),
-                parallel: args.parallel,
-                prefetch_rows: Some(5000),
-                exclude_tables: None,
-                enable_row_hash: None,
-                cpu_percent: args.cpu_percent,
-                field_delimiter: None,
-                schemas: None,
-                schemas_file: args.schemas_file.clone(),
-                tables: None,
-                tables_file: args.tables_file.clone(),
-                load_to_bq: Some(args.load),
-                use_client_hash: None,
-                adaptive_parallelism: None,
-                target_throughput_per_core: None,
-                file_format: args
-                    .format
-                    .as_ref()
-                    .map(|f| match f.to_lowercase().as_str() {
-                        "csv" => FileFormat::Csv,
-                        "parquet" => FileFormat::Parquet,
-                        _ => FileFormat::Csv,
-                    }),
-                parquet_compression: args.compression.clone(),
-                parquet_batch_size: args.parquet_batch_size,
-            },
-            bigquery: None,
-            gcp: None,
         }
     }
 }

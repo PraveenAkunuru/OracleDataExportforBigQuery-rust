@@ -87,7 +87,24 @@ Errors defined in [`errors.rs`](src/domain/errors.rs) are enriched with `table_n
 The exporter re-implements Oracle virtual columns as **BigQuery Views**, ensuring logic parity. Mapping rules are defined in [`mapping.rs`](src/domain/mapping.rs).
 
 ### Spatial Data (`SDO_GEOMETRY`)
-Spatial data is extracted via `SDO_UTIL.TO_WKTGEOMETRY` and cast to BigQuery `GEOGRAPHY`.
+### Interval-to-String Transformation
+Oracle `INTERVAL` types are transformed into a canonical string format that BigQuery's `INTERVAL` type can reliably parse. This logic handles signs, component isolation, and ensures compatibility with BigQuery's strict interval literal requirements.
+
+#### Year-Month Transformation
+```sql
+CASE WHEN "{col}" IS NULL THEN NULL ELSE 
+  CASE WHEN EXTRACT(YEAR FROM "{col}") < 0 OR EXTRACT(MONTH FROM "{col}") < 0 THEN '-' ELSE '' END || 
+  ABS(EXTRACT(YEAR FROM "{col}")) || '-' || ABS(EXTRACT(MONTH FROM "{col}")) || ' 0 0:0:0' END
+```
+
+#### Day-Second Transformation
+```sql
+CASE WHEN "{col}" IS NULL THEN NULL ELSE 
+  '0-0 ' || CASE WHEN EXTRACT(DAY FROM "{col}") < 0 OR EXTRACT(HOUR FROM "{col}") < 0 OR 
+  EXTRACT(MINUTE FROM "{col}") < 0 OR EXTRACT(SECOND FROM "{col}") < 0 THEN '-' ELSE '' END || 
+  ABS(EXTRACT(DAY FROM "{col}")) || ' ' || ABS(EXTRACT(HOUR FROM "{col}")) || ':' || 
+  ABS(EXTRACT(MINUTE FROM "{col}")) || ':' || ABS(EXTRACT(SECOND FROM "{col}")) END
+```
 
 ---
 

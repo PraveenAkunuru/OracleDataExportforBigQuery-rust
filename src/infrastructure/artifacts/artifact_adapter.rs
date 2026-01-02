@@ -1,25 +1,25 @@
 //! Infrastructure adapter for writing BigQuery and metadata artifacts to local storage.
 
-use crate::domain::errors::{ExportError, Result};
 use crate::domain::entities::{FileFormat, TableMetadata};
-use crate::ports::storage_port::StoragePort;
+use crate::domain::errors::{ExportError, Result};
+use crate::ports::artifact_port::ArtifactPort;
 // use log::{info, warn};
 use serde_json::json;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Concrete implementation of `StoragePort` for local filesystem storage.
+/// Concrete implementation of `ArtifactPort` for local filesystem storage.
 ///
 /// This adapter generates all sidecar files required for BigQuery ingestion
 /// and operational validation, including DDL, JSON schemas, and load scripts.
-pub struct FsAdapter {
+pub struct ArtifactAdapter {
     project_id: String,
     dataset_id: String,
 }
 
-impl FsAdapter {
-    /// Creates a new FsAdapter with BigQuery destination context.
+impl ArtifactAdapter {
+    /// Creates a new ArtifactAdapter with BigQuery destination context.
     pub fn new(project_id: String, dataset_id: String) -> Self {
         Self {
             project_id,
@@ -35,7 +35,7 @@ impl FsAdapter {
     }
 }
 
-impl StoragePort for FsAdapter {
+impl ArtifactPort for ArtifactAdapter {
     fn write_artifacts(
         &self,
         metadata: &TableMetadata,
@@ -96,7 +96,7 @@ impl StoragePort for FsAdapter {
     }
 }
 
-impl FsAdapter {
+impl ArtifactAdapter {
     /// Generates BigQuery DDL (Physical Table + Logical View).
     fn generate_bq_ddl(&self, metadata: &TableMetadata, enable_row_hash: bool) -> String {
         let physical_name = format!("{}_PHYSICAL", metadata.table_name);
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn test_generate_schema_json() {
-        let adapter = FsAdapter::new("p".into(), "d".into());
+        let adapter = ArtifactAdapter::new("p".into(), "d".into());
         let meta = TableMetadata {
             schema: "S".into(),
             table_name: "T".into(),
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_generate_bq_ddl() {
-        let adapter = FsAdapter::new("my-project".into(), "my-dataset".into());
+        let adapter = ArtifactAdapter::new("my-project".into(), "my-dataset".into());
         let meta = TableMetadata {
             schema: "TEST".into(),
             table_name: "MY_TABLE".into(),
@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn test_generate_load_command() {
-        let adapter = FsAdapter::new("p".into(), "d".into());
+        let adapter = ArtifactAdapter::new("p".into(), "d".into());
         let meta = TableMetadata {
             schema: "S".into(),
             table_name: "T".into(),

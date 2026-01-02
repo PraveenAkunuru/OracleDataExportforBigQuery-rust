@@ -16,7 +16,7 @@ A high-performance, single-binary utility for migrating large-scale Oracle datab
 *   **🛡️ Resilient Data Discovery**: Multi-layered fallback for table size discovery and `DATA_DEFAULT` truncation protection.
 *   **📊 Comprehensive Reporting**: Generates detailed JSON reports with MB/s, row counts, and data point validation.
 
-## 📈 Performance (Oracle 23c Free)
+## 📈 Performance (Oracle 23c Free on Docker with 2 vCPUs and 4GB RAM)
 
 *   **CSV (Gzip)**: **18.8 MB/s** (~63,000 rows/s)
 *   **Parquet**: **17.0 MB/s** (~26,000 rows/s)
@@ -96,7 +96,17 @@ The exporter performs high-fidelity type conversion to ensure Oracle data is rep
 | **`JSON`** (Native) | `JSON` | `Utf8` | Native BigQuery JSON support. |
 | `BLOB`, `RAW`, `BFILE` | `BYTES` | `Binary` | Binary data retention. |
 | `BOOLEAN` | `BOOL` | `Boolean` | Native flag support. |
-| `INTERVAL` | `INTERVAL` | `Utf8` | Converted via `TO_CHAR` for BigQuery compatibility. |
+| `INTERVAL` | `INTERVAL` | `Utf8` | Converted via robust SQL `EXTRACT` logic (e.g., `YEAR-MONTH 0 0:0:0`) for BigQuery compatibility. |
+
+### 🕒 Interval Transformation Details
+Oracle `INTERVAL` types are converted to strings using robust SQL logic to ensure BigQuery compatibility:
+
+- **Year-Month**: `(YEAR)-(MONTH) 0 0:0:0`
+  - Example: `1-2` -> `1-2 0 0:0:0`
+  - Logic: `CASE WHEN ... THEN '-' ELSE '' END || ABS(YEAR) || '-' || ABS(MONTH) || ' 0 0:0:0'`
+- **Day-Second**: `0-0 (DAY) (HOUR):(MIN):(SEC)`
+  - Example: `3 12:30:45` -> `0-0 3 12:30:45`
+  - Logic: `'0-0 ' || CASE WHEN ... THEN '-' ELSE '' END || ABS(DAY) || ' ' || ABS(HOUR) || ':' || ABS(MIN) || ':' || ABS(SEC)`
 
 ---
 

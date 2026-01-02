@@ -40,7 +40,7 @@ use std::sync::Arc;
 pub struct Extractor {
     pool: Arc<Pool<OracleConnectionManager>>,
     prefetch_rows: u32,
-    delimiter: u8,
+    field_delimiter: u8,
 }
 
 /// Helper enum to manage different Arrow array builders for Parquet export.
@@ -210,12 +210,12 @@ impl Extractor {
     pub fn new(
         pool: Arc<Pool<OracleConnectionManager>>,
         prefetch_rows: u32,
-        delimiter: u8,
+        field_delimiter: u8,
     ) -> Self {
         Self {
             pool,
             prefetch_rows,
-            delimiter,
+            field_delimiter,
         }
     }
 
@@ -276,7 +276,7 @@ impl Extractor {
         let encoder = GzEncoder::new(buf_writer, GzipCompression::fast());
 
         let mut wtr = WriterBuilder::new()
-            .delimiter(self.delimiter)
+            .delimiter(self.field_delimiter)
             .quote_style(QuoteStyle::NonNumeric)
             .from_writer(encoder);
 
@@ -451,33 +451,7 @@ impl Extractor {
 
             raw_names.push(name.clone());
 
-            let upper_type = data_type.to_uppercase();
-            let raw_expr = if upper_type.contains("TIME ZONE") {
-                format!(
-                    "TO_CHAR(SYS_EXTRACT_UTC(\"{}\"), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"')",
-                    name
-                )
-            } else if upper_type == "XMLTYPE" {
-                format!(
-                    "REPLACE(REPLACE(sys.XMLType.getStringVal(\"{}\"), CHR(10), ''), CHR(13), '')",
-                    name
-                )
-            } else if upper_type == "JSON" {
-                format!(
-                    "REPLACE(REPLACE(JSON_SERIALIZE(\"{}\"), CHR(10), ''), CHR(13), '')",
-                    name
-                )
-            } else if upper_type == "BOOLEAN" {
-                format!("CASE WHEN \"{}\" THEN 'true' ELSE 'false' END", name)
-            } else if upper_type.contains("SDO_GEOMETRY") {
-                format!("SDO_UTIL.TO_WKTGEOMETRY(\"{}\")", name)
-            } else if upper_type.contains("UROWID") || upper_type.contains("ROWID") {
-                format!("ROWIDTOCHAR(\"{}\")", name)
-            } else if upper_type.contains("INTERVAL") {
-                format!("TO_CHAR(\"{}\")", name)
-            } else {
-                format!("\"{}\"", name)
-            };
+            let raw_expr = self.build_column_expression(&name, &data_type);
 
             select_parts.push(format!("{} AS \"{}\"", raw_expr, name));
 
@@ -551,6 +525,51 @@ impl Extractor {
             ts.second(),
             ts.nanosecond() / 1000
         )
+    }
+    fn build_column_expression(&self, name: &str, data_type: &str) -> String {
+        let upper_type = data_type.to_uppercase();
+        if upper_type.contains("TIME ZONE") {
+            format!(
+                "TO_CHAR(SYS_EXTRACT_UTC(\"{}\"), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"')",
+                name
+            )
+        } else if upper_type == "XMLTYPE" {
+            format!(
+                "REPLACE(REPLACE(sys.XMLType.getStringVal(\"{}\"), CHR(10), ''), CHR(13), '')",
+                name
+            )
+        } else if upper_type == "JSON" {
+            format!(
+                "REPLACE(REPLACE(JSON_SERIALIZE(\"{}\"), CHR(10), ''), CHR(13), '')",
+                name
+            )
+        } else if upper_type == "BOOLEAN" {
+            format!("CASE WHEN \"{}\" THEN 'true' ELSE 'false' END", name)
+        } else if upper_type.contains("SDO_GEOMETRY") {
+            format!("SDO_UTIL.TO_WKTGEOMETRY(\"{}\")", name)
+        } else if upper_type.contains("UROWID") || upper_type.contains("ROWID") {
+            format!("ROWIDTOCHAR(\"{}\")", name)
+        } else if upper_type.contains("INTERVAL YEAR") {
+            format!(
+                "CASE WHEN \"{}\" IS NULL THEN NULL ELSE \
+                 CASE WHEN EXTRACT(YEAR FROM \"{}\") < 0 OR EXTRACT(MONTH FROM \"{}\") < 0 THEN '-' ELSE '' END || \
+                 ABS(EXTRACT(YEAR FROM \"{}\")) || '-' || ABS(EXTRACT(MONTH FROM \"{}\")) || ' 0 0:0:0' END",
+                name, name, name, name, name
+            )
+        } else if upper_type.contains("INTERVAL DAY") {
+            format!(
+                "CASE WHEN \"{}\" IS NULL THEN NULL ELSE \
+                 '0-0 ' || CASE WHEN EXTRACT(DAY FROM \"{}\") < 0 OR EXTRACT(HOUR FROM \"{}\") < 0 OR \
+                 EXTRACT(MINUTE FROM \"{}\") < 0 OR EXTRACT(SECOND FROM \"{}\") < 0 THEN '-' ELSE '' END || \
+                 ABS(EXTRACT(DAY FROM \"{}\")) || ' ' || ABS(EXTRACT(HOUR FROM \"{}\")) || ':' || \
+                 ABS(EXTRACT(MINUTE FROM \"{}\")) || ':' || ABS(EXTRACT(SECOND FROM \"{}\")) END",
+                name, name, name, name, name, name, name, name, name
+            )
+        } else if upper_type.contains("INTERVAL") {
+            format!("TO_CHAR(\"{}\")", name)
+        } else {
+            format!("\"{}\"", name)
+        }
     }
 }
 

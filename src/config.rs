@@ -319,6 +319,50 @@ impl AppConfig {
         }
     }
 
+    pub fn default_from_cli(args: &CliArgs) -> Self {
+        Self {
+            database: DatabaseConfig {
+                username: args.username.clone().unwrap_or_default(),
+                password: args.password.clone(),
+                host: args.host.clone().unwrap_or_default(),
+                port: args.port.unwrap_or(1521),
+                service: args.service.clone().unwrap_or_default(),
+                connection_string: None,
+            },
+            export: ExportConfig {
+                output_dir: args.output.clone().unwrap_or_else(|| ".".to_string()),
+                schema: None,
+                table: args.table.clone(),
+                parallel: args.parallel,
+                prefetch_rows: Some(5000),
+                exclude_tables: None,
+                enable_row_hash: None,
+                cpu_percent: args.cpu_percent,
+                field_delimiter: None,
+                schemas: None,
+                schemas_file: args.schemas_file.clone(),
+                tables: None,
+                tables_file: args.tables_file.clone(),
+                load_to_bq: Some(args.load),
+                use_client_hash: None,
+                adaptive_parallelism: None,
+                target_throughput_per_core: None,
+                file_format: args
+                    .format
+                    .as_ref()
+                    .map(|f| match f.to_lowercase().as_str() {
+                        "csv" => FileFormat::Csv,
+                        "parquet" => FileFormat::Parquet,
+                        _ => FileFormat::Csv,
+                    }),
+                parquet_compression: args.compression.clone(),
+                parquet_batch_size: args.parquet_batch_size,
+            },
+            bigquery: None,
+            gcp: None,
+        }
+    }
+
     pub fn is_excluded(&self, table_name: &str) -> bool {
         if let Some(excluded) = &self.export.exclude_tables {
             let up = table_name.to_uppercase();

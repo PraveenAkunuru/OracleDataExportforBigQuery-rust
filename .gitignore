@@ -14,3 +14,10 @@ adaptive_output/
 golden_path_output/
 features_test_output/
 *_output/
+export_docker/
+bench_csv/
+bench_parquet/
+bench_test/
+bench_test_parquet/
+bench_types_csv/
+bench_types_parquet/
