@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # Master test runner for Oracle Data Exporter
 # Exit on error for critical steps

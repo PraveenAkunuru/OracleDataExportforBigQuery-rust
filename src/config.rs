@@ -1,32 +1,29 @@
-//! # Configuration Module
+//! Configuration management for the Oracle Data Exporter.
 //!
-//! Handles parsing of YAML/JSON configuration files and command-line arguments.
-//!
-//! ## Key Structs
-//! - `AppConfig`: The top-level configuration object.
-//! - `CliArgs`: The struct derived from Clap for CLI parsing.
-//!
-//! This module also implements strict validation to prevent invalid runtime states (e.g. 0 threads).
+//! Provides structures and logic to load configuration from YAML/JSON files,
+//! override with command-line arguments, and validate all parameters.
 
+use crate::domain::export_models::FileFormat;
+use clap::Parser;
 use serde::Deserialize;
+use std::error::Error;
 use std::fs::File;
 use std::io::Read;
-use clap::Parser;
-use std::error::Error;
 
+/// Top-level application configuration.
 #[derive(Debug, Deserialize, Clone)]
-/// Main application configuration.
 pub struct AppConfig {
-    /// Database connection details
+    /// Database connection parameters.
     pub database: DatabaseConfig,
-    /// Export behavior settings
+    /// Settings governing the export and extraction process.
     pub export: ExportConfig,
-    /// BigQuery settings (Optional, mostly for schema gen)
+    /// Targeted BigQuery project and dataset settings.
     pub bigquery: Option<BigQueryConfig>,
-    /// GCP settings for Translation API
+    /// Google Cloud Platform context (used for translation or storage).
     pub gcp: Option<GcpConfig>,
 }
 
+/// GCP-specific credentials and configuration.
 #[derive(Debug, Deserialize, Clone)]
 pub struct GcpConfig {
     pub project_id: String,
@@ -95,6 +92,10 @@ pub struct ExportConfig {
     pub adaptive_parallelism: Option<bool>,
     /// Target MB/s per core for adaptive logic (default 12.0)
     pub target_throughput_per_core: Option<f64>,
+    /// Target file format (default CSV)
+    pub file_format: Option<FileFormat>,
+    /// Compression for Parquet (default ZSTD)
+    pub parquet_compression: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -111,7 +112,7 @@ pub struct CliArgs {
     /// Path to configuration file (YAML or JSON)
     #[arg(short, long)]
     pub config: Option<String>,
-    
+
     // Overrides for ad-hoc runs
     #[arg(long)]
     pub username: Option<String>,
@@ -140,6 +141,12 @@ pub struct CliArgs {
     /// Override target CPU usage percent (1-100)
     #[arg(long)]
     pub cpu_percent: Option<u8>,
+    /// Target file format (csv, parquet)
+    #[arg(long)]
+    pub format: Option<String>,
+    /// Parquet compression (zstd, snappy, gzip, lzo, brotli, lz4, none)
+    #[arg(long)]
+    pub compression: Option<String>,
 }
 
 impl AppConfig {
@@ -147,27 +154,58 @@ impl AppConfig {
         let mut file = File::open(path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
-        
+
         let config: AppConfig = if path.ends_with(".json") {
             serde_json::from_str(&contents)?
         } else {
             serde_yaml::from_str(&contents)?
         };
-        
+
         Ok(config)
     }
 
     pub fn merge_cli(&mut self, args: &CliArgs) {
-        if let Some(u) = &args.username { self.database.username = u.clone(); }
-        if let Some(p) = &args.password { self.database.password = Some(p.clone()); }
-        if let Some(h) = &args.host { self.database.host = h.clone(); }
-        if let Some(p) = args.port { self.database.port = p; }
-        if let Some(s) = &args.service { self.database.service = s.clone(); }
-        if let Some(t) = &args.table { self.export.table = Some(t.clone()); }
-        if let Some(o) = &args.output { self.export.output_dir = o.clone(); }
-        if args.load { self.export.load_to_bq = Some(true); }
-        if let Some(p) = args.parallel { self.export.parallel = Some(p); }
-        if let Some(c) = args.cpu_percent { self.export.cpu_percent = Some(c); }
+        if let Some(u) = &args.username {
+            self.database.username = u.clone();
+        }
+        if let Some(p) = &args.password {
+            self.database.password = Some(p.clone());
+        }
+        if let Some(h) = &args.host {
+            self.database.host = h.clone();
+        }
+        if let Some(p) = args.port {
+            self.database.port = p;
+        }
+        if let Some(s) = &args.service {
+            self.database.service = s.clone();
+        }
+        if let Some(t) = &args.table {
+            self.export.table = Some(t.clone());
+        }
+        if let Some(o) = &args.output {
+            self.export.output_dir = o.clone();
+        }
+        if args.load {
+            self.export.load_to_bq = Some(true);
+        }
+        if let Some(p) = args.parallel {
+            self.export.parallel = Some(p);
+        }
+        if let Some(c) = args.cpu_percent {
+            self.export.cpu_percent = Some(c);
+        }
+        if let Some(f) = &args.format {
+            let format = match f.to_lowercase().as_str() {
+                "csv" => FileFormat::Csv,
+                "parquet" => FileFormat::Parquet,
+                _ => FileFormat::Csv, // Default or warn?
+            };
+            self.export.file_format = Some(format);
+        }
+        if let Some(c) = &args.compression {
+            self.export.parquet_compression = Some(c.clone());
+        }
     }
 
     pub fn validate(&self) -> Result<(), Box<dyn Error>> {
@@ -188,10 +226,79 @@ impl AppConfig {
         }
         if let Some(d) = &self.export.field_delimiter {
             if d.len() != 1 || !d.is_ascii() {
-                 return Err("export.field_delimiter must be a single ASCII character".into());
+                return Err("export.field_delimiter must be a single ASCII character".into());
             }
         }
         Ok(())
+    }
+
+    pub fn get_schemas(&self) -> Vec<String> {
+        let mut schemas = std::collections::HashSet::new();
+        if let Some(s) = &self.export.schema {
+            schemas.insert(s.to_uppercase());
+        }
+        if let Some(list) = &self.export.schemas {
+            for s in list {
+                schemas.insert(s.to_uppercase());
+            }
+        }
+        if let Some(path) = &self.export.schemas_file {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                for line in content.lines() {
+                    let s = line.trim();
+                    if !s.is_empty() {
+                        schemas.insert(s.to_uppercase());
+                    }
+                }
+            }
+        }
+        if schemas.is_empty() {
+            schemas.insert(self.database.username.to_uppercase());
+        }
+        let mut v: Vec<String> = schemas.into_iter().collect();
+        v.sort();
+        v
+    }
+
+    pub fn get_target_tables(&self) -> Option<std::collections::HashSet<String>> {
+        let mut tables = std::collections::HashSet::new();
+        let mut any = false;
+
+        if let Some(t) = &self.export.table {
+            tables.insert(t.to_uppercase());
+            any = true;
+        }
+        if let Some(list) = &self.export.tables {
+            for t in list {
+                tables.insert(t.to_uppercase());
+                any = true;
+            }
+        }
+        if let Some(path) = &self.export.tables_file {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                for line in content.lines() {
+                    let t = line.trim();
+                    if !t.is_empty() {
+                        tables.insert(t.to_uppercase());
+                        any = true;
+                    }
+                }
+            }
+        }
+
+        if any {
+            Some(tables)
+        } else {
+            None
+        }
+    }
+
+    pub fn is_excluded(&self, table_name: &str) -> bool {
+        if let Some(excluded) = &self.export.exclude_tables {
+            let up = table_name.to_uppercase();
+            return excluded.iter().any(|e| e.to_uppercase() == up);
+        }
+        false
     }
 }
 
@@ -219,7 +326,7 @@ export:
         let path = file.path().to_str().unwrap();
 
         let config = AppConfig::from_file(path).expect("Failed to parse config");
-        
+
         assert_eq!(config.database.username, "test_user");
         assert_eq!(config.database.port, 1521);
         assert_eq!(config.export.table.as_deref(), Some("MY_TABLE"));
@@ -230,24 +337,53 @@ export:
     fn test_merge_cli_overrides() {
         let mut config = AppConfig {
             database: DatabaseConfig {
-                username: "u".into(), password: None, host: "h".into(), port: 1521, service: "s".into(),
+                username: "u".into(),
+                password: None,
+                host: "h".into(),
+                port: 1521,
+                service: "s".into(),
                 connection_string: None,
             },
             export: ExportConfig {
-                output_dir: ".".into(), schema: None, table: None, parallel: Some(4), prefetch_rows: None,
-                exclude_tables: None, enable_row_hash: None, cpu_percent: Some(20), field_delimiter: None,
-                schemas: None, schemas_file: None, tables: None, tables_file: None, load_to_bq: None,
-                use_client_hash: None, adaptive_parallelism: None, target_throughput_per_core: None,
+                output_dir: ".".into(),
+                schema: None,
+                table: None,
+                parallel: Some(4),
+                prefetch_rows: None,
+                exclude_tables: None,
+                enable_row_hash: None,
+                cpu_percent: Some(20),
+                field_delimiter: None,
+                schemas: None,
+                schemas_file: None,
+                tables: None,
+                tables_file: None,
+                load_to_bq: None,
+                use_client_hash: None,
+                adaptive_parallelism: None,
+                target_throughput_per_core: None,
+                file_format: None,
+                parquet_compression: None,
             },
             bigquery: None,
             gcp: None,
         };
 
         let args = CliArgs {
-            config: None, username: None, password: None, host: None, service: None, port: None,
-            table: None, output: None, query_where: None, load: true,
+            config: None,
+            username: None,
+            password: None,
+            host: None,
+            service: None,
+            port: None,
+            table: None,
+            output: None,
+            query_where: None,
+            load: true,
             parallel: Some(10),
             cpu_percent: Some(80),
+            format: None,
+            compression: None,
         };
 
         config.merge_cli(&args);

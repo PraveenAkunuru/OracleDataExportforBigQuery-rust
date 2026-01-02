@@ -7,6 +7,9 @@ PROJECT_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
 BIN="$PROJECT_ROOT/target/release/oracle_rust_exporter"
 CONFIG_DIR="$PROJECT_ROOT/tests/configs/negative"
 
+# Found Oracle Instant Client and libaio libraries here
+export LD_LIBRARY_PATH="$PROJECT_ROOT/lib/instantclient_19_10:$PROJECT_ROOT/lib:${LD_LIBRARY_PATH:-}"
+
 cd "$PROJECT_ROOT"
 
 echo "=== Test 1: Invalid Config Path ==="

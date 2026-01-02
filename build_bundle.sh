@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # Configuration
 DIST_DIR="dist"
@@ -71,7 +71,7 @@ cat > "$DIST_DIR/run.sh" << 'EOF'
 APP_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Set LD_LIBRARY_PATH to include our bundled lib/ dir
-export LD_LIBRARY_PATH="$APP_ROOT/lib:$LD_LIBRARY_PATH"
+export LD_LIBRARY_PATH="$APP_ROOT/lib:${LD_LIBRARY_PATH:-}"
 
 # Run the binary
 exec "$APP_ROOT/oracle_rust_exporter" "$@"
