@@ -1,7 +1,16 @@
-//! The core application logic that orchestrates the overall export process.
+//! # Export Orchestrator
 //!
-//! This module coordinates between the schema reader, data streamer, and artifact
-//! writer to discover tables, plan chunks, and aggregate results.
+//! The Orchestrator is the "Brain" of the application. 
+//!
+//! In **Hexagonal Architecture**, the Orchestrator lives in the "Domain" or "Application" 
+//! layer. It knows the **business process** (how to export a table), but it 
+//! doesn't know the **technical details** (how to talk to Oracle or how to write 
+//! a Parquet file). 
+//!
+//! It communicates with the outside world through **Ports** (interfaces):
+//! - `MetadataPort`: To ask "what tables exist?" and "what columns does this table have?"
+//! - `ExtractionPort`: To say "stream this data to this file."
+//! - `ArtifactPort`: To say "generate the BigQuery schema for this table."
 
 use crate::config::AppConfig as Config;
 use crate::domain::errors::Result;
@@ -15,8 +24,12 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Orchestrates the end-to-end export of multiple Oracle schemas and tables.
+/// `Orchestrator` coordinates the end-to-end export process.
 pub struct Orchestrator {
+    // We use `Arc<dyn ...>` to hold our ports.
+    // - `Arc`: safe to share across threads.
+    // - `dyn`: stands for "Dynamic". It means we can swap the implementation 
+    //   (e.g., use a `Mock` port during testing).
     metadata_port: Arc<dyn MetadataPort>,
     extraction_port: Arc<dyn ExtractionPort>,
     artifact_port: Arc<dyn ArtifactPort>,
@@ -24,7 +37,7 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
-    /// Creates a new Orchestrator with the provided components.
+    /// Creates a new Orchestrator. Note how we "inject" the dependencies here.
     pub fn new(
         metadata_port: Arc<dyn MetadataPort>,
         extraction_port: Arc<dyn ExtractionPort>,
@@ -39,58 +52,64 @@ impl Orchestrator {
         }
     }
 
-    /// Entry point for running the full export process.
+    /// The main entry point for starting the export.
     ///
-    /// This method performs table discovery, applies filters/exclusions,
-    /// and processes all eligible tables in parallel.
+    /// It performs target discovery (finding which tables to export) and then
+    /// runs them in parallel using Rayon.
     pub fn run(&self) -> Result<Vec<TaskResult>> {
         let start_time = Instant::now();
         info!("Starting Export Orchestrator...");
 
-        let schemas = self.config.get_schemas();
+        // --- STEP 1: DISCOVERY ---
+        // We look at the configurations to see which schemas and tables the user wants.
         let target_tables = self.config.get_target_tables();
         let mut all_tables = Vec::new();
-
-        for schema in schemas {
-            let db_tables = self.metadata_port.get_tables(&schema)?;
-            for t in db_tables {
-                let t_up = t.to_uppercase();
-                if self.config.is_excluded(&t_up) {
-                    info!("Skipping excluded table: {}.{}", schema, t);
-                    continue;
-                }
-                if let Some(targets) = &target_tables {
-                    if !targets.contains(&t_up) {
-                        continue;
-                    }
-                }
-                all_tables.push((schema.clone(), t));
+        for schema in self.config.get_schemas() {
+            // We use the `metadata_port` to ask Oracle what tables are in this schema.
+            let tables = self.metadata_port.get_tables(&schema)?;
+            for table in tables {
+                all_tables.push((schema.clone(), table));
             }
         }
 
-        if all_tables.is_empty() {
+        // --- STEP 2: FILTERING ---
+        // We filter out tables that are explicitly excluded or not in the target list.
+        let eligible_tables: Vec<(String, String)> = all_tables.into_iter()
+            .filter(|(schema, table)| {
+                let t_up = table.to_uppercase();
+                if self.config.is_excluded(&t_up) {
+                    info!("Skipping excluded table: {}.{}", schema, table);
+                    return false;
+                }
+                if let Some(targets) = &target_tables {
+                    if !targets.contains(&t_up) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        if eligible_tables.is_empty() {
             info!("No tables found to export.");
             return Ok(vec![]);
         }
 
-        let results: Vec<TaskResult> = all_tables
+        // --- STEP 3: PARALLEL EXECUTION ---
+        // `.into_par_iter()` comes from the `rayon` crate. It automatically 
+        // distributes the table exports across all available CPU threads.
+        let results: Vec<TaskResult> = eligible_tables
             .into_par_iter()
-            .map(
-                |(schema, table)| match self.process_table(&schema, &table) {
-                    Ok(res) => res,
-                    Err(e) => {
-                        error!("Table {}.{} failed: {:?}", schema, table, e);
-                        TaskResult::failure(schema, table, None, format!("{:?}", e))
-                    }
-                },
-            )
+            .map(|(schema, table)| self.process_table(&schema, &table))
             .collect();
 
+        // --- STEP 4: REPORTING ---
+        // We generate a JSON report with summary statistics at the end.
         self.generate_report(&results, start_time.elapsed().as_secs_f64())?;
-
         Ok(results)
     }
 
+    /// Generates a final JSON report showing total rows, bytes, and throughput.
     fn generate_report(&self, results: &[TaskResult], duration_secs: f64) -> Result<()> {
         let success = results.iter().filter(|r| r.status == "SUCCESS").count();
         let failed = results.len() - success;
@@ -128,123 +147,126 @@ impl Orchestrator {
 
     /// Orchestrates the export of a single table.
     ///
-    /// This involves metadata discovery, artifact generation (DDL/Schema),
-    /// and either single-file extraction or parallel chunked extraction.
-    fn process_table(&self, schema: &str, table: &str) -> Result<TaskResult> {
+    /// The process flow is:
+    /// 1. Fetch Metadata (Column names, types, size).
+    /// 2. Setup Directories (Where the CSVs and DDL will go).
+    /// 3. Write Artifacts (BigQuery DDL, schema.json).
+    /// 4. Plan Tasks (Single file or multiple chunks).
+    /// 5. Execute Tasks (using the ExtractionPort).
+    /// 6. Aggregate Results.
+    fn process_table(&self, schema: &str, table: &str) -> TaskResult {
         info!("Processing {}.{}", schema, table);
 
-        let metadata = self.metadata_port.get_table_metadata(schema, table)?;
+        // --- STEP 1: METADATA ---
+        let metadata = match self.metadata_port.get_table_metadata(schema, table) {
+            Ok(m) => m,
+            Err(e) => return TaskResult::failure(schema.to_string(), table.to_string(), None, format!("Metadata failed: {:?}", e)),
+        };
 
+        // --- STEP 2: SETUP ---
         let out_dir = format!("{}/{}/{}", self.config.export.output_dir, schema, table);
         let config_dir = format!("{}/config", out_dir);
-        std::fs::create_dir_all(&config_dir)?;
+        let data_dir = format!("{}/data", out_dir);
+        if let Err(e) = std::fs::create_dir_all(&config_dir).and_then(|_| std::fs::create_dir_all(&data_dir)) {
+            return TaskResult::failure(schema.to_string(), table.to_string(), None, format!("Dir creation failed: {:?}", e));
+        }
 
         let enable_row_hash = self.config.export.enable_row_hash.unwrap_or(false);
-        let use_client_hash = self.config.export.use_client_hash.unwrap_or(false);
         let file_format = self.config.export.file_format.unwrap_or(FileFormat::Csv);
-        let parquet_compression = self.config.export.parquet_compression.clone();
+        
+        // --- STEP 3: ARTIFACTS ---
+        if let Err(e) = self.artifact_port.write_artifacts(&metadata, &config_dir, enable_row_hash, file_format) {
+            return TaskResult::failure(schema.to_string(), table.to_string(), None, format!("Artifacts failed: {:?}", e));
+        }
 
         let extension = match file_format {
             FileFormat::Csv => "csv.gz",
             FileFormat::Parquet => "parquet",
         };
 
-        self.artifact_port.write_artifacts(
-            &metadata,
-            &config_dir,
-            enable_row_hash,
-            file_format,
-        )?;
-
-        let data_dir = format!("{}/data", out_dir);
-        std::fs::create_dir_all(&data_dir)?;
-
+        // --- STEP 4: TASK PLANNING ---
+        // If the table is large (> 1GB) and we have parallel threads available,
+        // we split the table into "chunks" using Oracle ROWID ranges.
         let parallel = self.config.export.parallel.unwrap_or(1);
-        if parallel > 1 && metadata.size_gb > 1.0 {
-            let chunks = self
-                .metadata_port
-                .generate_table_chunks(schema, table, parallel)?;
-            if !chunks.is_empty() {
-                info!("Exporting {}.{} in {} chunks", schema, table, chunks.len());
-                let results: Vec<TaskResult> = chunks
-                    .into_par_iter()
-                    .enumerate()
-                    .map(|(i, where_clause)| {
-                        let chunk_id = i as u32;
-                        let task = ExportTask {
-                            schema: schema.to_string(),
-                            table: table.to_string(),
-                            chunk_id: Some(chunk_id),
-                            query_where: Some(where_clause),
-                            output_file: format!("{}/data_chunk_{:04}.{}", data_dir, i, extension),
-                            enable_row_hash,
-                            use_client_hash,
-                            file_format,
-                            parquet_compression: parquet_compression.clone(),
-                            parquet_batch_size: self.config.export.parquet_batch_size,
-                        };
-                        match self.extraction_port.export_task(task) {
-                            Ok(r) => r,
-                            Err(e) => TaskResult::failure(
-                                schema.to_string(),
-                                table.to_string(),
-                                Some(chunk_id),
-                                format!("{:?}", e),
-                            ),
-                        }
-                    })
-                    .collect();
+        let chunks = if parallel > 1 && metadata.size_gb > 1.0 {
+            self.metadata_port.generate_table_chunks(schema, table, parallel).unwrap_or_default()
+        } else {
+            vec![]
+        };
 
-                let mut total_rows = 0;
-                let mut total_bytes = 0;
-                let mut max_duration = 0.0;
-                let mut errors = Vec::new();
+        // We building a list of `ExportTask` objects to execute.
+        let tasks: Vec<ExportTask> = if chunks.is_empty() {
+            // SINGLE FILE: No where clause needed.
+            vec![ExportTask {
+                schema: schema.to_string(),
+                table: table.to_string(),
+                chunk_id: None,
+                query_where: None,
+                output_file: format!("{}/data.{}", data_dir, extension),
+                enable_row_hash,
+                use_client_hash: self.config.export.use_client_hash.unwrap_or(false),
+                file_format,
+                parquet_compression: self.config.export.parquet_compression.clone(),
+                parquet_batch_size: self.config.export.parquet_batch_size,
+            }]
+        } else {
+            // MULTI-CHUNK: Each chunk has a unique ROWID range in the WHERE clause.
+            chunks.into_iter().enumerate().map(|(i, where_clause)| ExportTask {
+                schema: schema.to_string(),
+                table: table.to_string(),
+                chunk_id: Some(i as u32),
+                query_where: Some(where_clause),
+                output_file: format!("{}/data_chunk_{:04}.{}", data_dir, i, extension),
+                enable_row_hash,
+                use_client_hash: self.config.export.use_client_hash.unwrap_or(false),
+                file_format,
+                parquet_compression: self.config.export.parquet_compression.clone(),
+                parquet_batch_size: self.config.export.parquet_batch_size,
+            }).collect()
+        };
 
-                for res in results {
-                    total_rows += res.rows;
-                    total_bytes += res.bytes;
-                    if res.duration > max_duration {
-                        max_duration = res.duration;
-                    }
-                    if res.status == "FAILED" {
-                        errors.push(res.error.unwrap_or_default());
-                    }
-                }
+        if tasks.len() > 1 {
+            info!("Exporting {}.{} in {} chunks", schema, table, tasks.len());
+        }
 
-                return if errors.is_empty() {
-                    Ok(TaskResult::success(
-                        schema.to_string(),
-                        table.to_string(),
-                        total_rows,
-                        total_bytes,
-                        max_duration,
-                        None,
-                    ))
-                } else {
-                    Ok(TaskResult::failure(
-                        schema.to_string(),
-                        table.to_string(),
-                        None,
-                        errors.join("; "),
-                    ))
-                };
+        // --- STEP 5: EXECUTION ---
+        // We use rayons `into_par_iter()` again here!
+        // This is "Nested Parallelism": multiple tables in parallel, and chunks 
+        // within a table in parallel.
+        let results: Vec<TaskResult> = tasks.into_par_iter()
+            .map(|task| self.extraction_port.export_task(task, &metadata)
+                .unwrap_or_else(|e| TaskResult::failure(schema.to_string(), table.to_string(), None, format!("{:?}", e))))
+            .collect();
+
+        // --- STEP 6: AGGREGATION ---
+        self.aggregate_results(schema, table, results)
+    }
+
+    /// Combines multiple chunk results into a single table result.
+    fn aggregate_results(&self, schema: &str, table: &str, results: Vec<TaskResult>) -> TaskResult {
+        if results.len() == 1 {
+            return results.into_iter().next().unwrap();
+        }
+
+        let mut total_rows = 0;
+        let mut total_bytes = 0;
+        let mut max_duration: f64 = 0.0;
+        let mut errors = Vec::new();
+
+        for res in results {
+            total_rows += res.rows;
+            total_bytes += res.bytes;
+            max_duration = max_duration.max(res.duration);
+            if res.status == "FAILED" {
+                errors.push(res.error.unwrap_or_default());
             }
         }
 
-        let task = ExportTask {
-            schema: schema.to_string(),
-            table: table.to_string(),
-            chunk_id: None,
-            query_where: None,
-            output_file: format!("{}/data.{}", data_dir, extension),
-            enable_row_hash,
-            use_client_hash,
-            file_format,
-            parquet_compression,
-            parquet_batch_size: self.config.export.parquet_batch_size,
-        };
-
-        self.extraction_port.export_task(task)
+        if errors.is_empty() {
+            TaskResult::success(schema.to_string(), table.to_string(), total_rows, total_bytes, max_duration, None)
+        } else {
+            TaskResult::failure(schema.to_string(), table.to_string(), None, errors.iter().filter(|e| !e.is_empty()).cloned().collect::<Vec<_>>().join("; "))
+        }
     }
 }
 
@@ -312,7 +334,7 @@ mod tests {
 
     struct MockExtractionPort;
     impl ExtractionPort for MockExtractionPort {
-        fn export_task(&self, task: ExportTask) -> Result<TaskResult> {
+        fn export_task(&self, task: ExportTask, _metadata: &TableMetadata) -> Result<TaskResult> {
             Ok(TaskResult::success(
                 task.schema,
                 task.table,

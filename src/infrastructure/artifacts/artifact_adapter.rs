@@ -1,33 +1,34 @@
-//! Infrastructure adapter for writing BigQuery and metadata artifacts to local storage.
+//! # BigQuery Artifact Adapter
+//!
+//! This adapter is responsible for generating the "Instruction Manual" for BigQuery.
+//!
+//! It creates 5 main files for every table:
+//! 1. `bigquery.ddl`: SQL to create the table and view in BigQuery.
+//! 2. `schema.json`: The JSON schema file used by the `bq load` command.
+//! 3. `metadata.json`: A record of what settings were used during this export.
+//! 4. `load_command.sh`: A helper bash script to load the data into Google Cloud.
+//! 5. `export.sql`: The original query used to fetch data (for debugging).
 
 use crate::domain::entities::{FileFormat, TableMetadata};
 use crate::domain::errors::{ExportError, Result};
 use crate::ports::artifact_port::ArtifactPort;
-// use log::{info, warn};
 use serde_json::json;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Concrete implementation of `ArtifactPort` for local filesystem storage.
-///
-/// This adapter generates all sidecar files required for BigQuery ingestion
-/// and operational validation, including DDL, JSON schemas, and load scripts.
+/// `ArtifactAdapter` implements the `ArtifactPort`.
 pub struct ArtifactAdapter {
     project_id: String,
     dataset_id: String,
 }
 
 impl ArtifactAdapter {
-    /// Creates a new ArtifactAdapter with BigQuery destination context.
     pub fn new(project_id: String, dataset_id: String) -> Self {
-        Self {
-            project_id,
-            dataset_id,
-        }
+        Self { project_id, dataset_id }
     }
 
-    /// Helper to write string content to a file at the specified path.
+    /// Helper to write text to a file.
     fn write_file(&self, path: PathBuf, content: &str) -> std::io::Result<()> {
         let mut f = File::create(path)?;
         f.write_all(content.as_bytes())?;
@@ -36,6 +37,7 @@ impl ArtifactAdapter {
 }
 
 impl ArtifactPort for ArtifactAdapter {
+    /// Generates and writes all sidecar files.
     fn write_artifacts(
         &self,
         metadata: &TableMetadata,
@@ -45,12 +47,14 @@ impl ArtifactPort for ArtifactAdapter {
     ) -> Result<()> {
         let config_path = Path::new(output_config_dir);
 
-        // 1. BigQuery DDL
+        // --- 1. BIGQUERY DDL ---
+        // We create a "Physical" table to hold raw data and a "Logical" view for users.
         let bq_ddl = self.generate_bq_ddl(metadata, enable_row_hash);
         self.write_file(config_path.join("bigquery.ddl"), &bq_ddl)
             .map_err(ExportError::IoError)?;
 
-        // 2. Schema JSON
+        // --- 2. SCHEMA JSON ---
+        // BigQuery needs a JSON map of columns and types to load raw files.
         let schema_json = self.generate_schema_json(metadata, enable_row_hash);
         self.write_file(
             config_path.join("schema.json"),
@@ -58,15 +62,14 @@ impl ArtifactPort for ArtifactAdapter {
         )
         .map_err(ExportError::IoError)?;
 
-        // 3. Metadata JSON
+        // --- 3. METADATA JSON ---
+        // Useful for audit logs and verification tools.
         let meta_json = json!({
             "table_name": metadata.table_name,
             "schema_name": metadata.schema,
-            "full_name": format!("{}.{}", metadata.schema, metadata.table_name),
             "export_timestamp": chrono::Utc::now().to_rfc3339(),
             "columns": metadata.columns,
             "pk": metadata.pk_cols,
-            "partition_keys": metadata.partition_cols
         });
         self.write_file(
             config_path.join("metadata.json"),
@@ -74,11 +77,14 @@ impl ArtifactPort for ArtifactAdapter {
         )
         .map_err(ExportError::IoError)?;
 
-        // 4. Load Command
+        // --- 4. LOAD COMMAND ---
+        // We generate the exact `bq load ...` CLI command to save the user time.
         let load_cmd = self.generate_load_command(metadata, file_format);
         let load_cmd_path = config_path.join("load_command.sh");
         self.write_file(load_cmd_path.clone(), &load_cmd)
             .map_err(ExportError::IoError)?;
+        
+        // Make the script executable on Linux/Mac.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -87,170 +93,93 @@ impl ArtifactPort for ArtifactAdapter {
             }
         }
 
-        // 5. Export SQL (Reference)
-        let export_sql = self.generate_export_sql(metadata, enable_row_hash);
-        self.write_file(config_path.join("export.sql"), &export_sql)
-            .map_err(ExportError::IoError)?;
-
         Ok(())
     }
 }
 
+const DDL_TEMPLATE: &str = r#"-- 1. Physical Table: This holds the raw data.
+CREATE OR REPLACE TABLE `{project_id}.{dataset_id}.{physical_name}` (
+{column_definitions}{hash_column}{primary_key}
+)
+{partitioning}
+{clustering};
+
+-- 2. Logical View: This is what analysts should query.
+CREATE OR REPLACE VIEW `{project_id}.{dataset_id}.{table_name}` AS SELECT
+{view_columns}{view_hash}
+FROM `{project_id}.{dataset_id}.{physical_name}`;
+"#;
+
 impl ArtifactAdapter {
-    /// Generates BigQuery DDL (Physical Table + Logical View).
+    /// Generates optimized BigQuery DDL.
     fn generate_bq_ddl(&self, metadata: &TableMetadata, enable_row_hash: bool) -> String {
         let physical_name = format!("{}_PHYSICAL", metadata.table_name);
-        let mut ddl = format!(
-            "-- 1. Physical Table\nCREATE OR REPLACE TABLE `{}.{}.{}` (\n",
-            self.project_id, self.dataset_id, physical_name
-        );
+        
+        // Definitions for columns that actually exist on disk (no virtual columns).
+        let column_definitions = metadata.columns.iter()
+            .filter(|c| !c.is_virtual)
+            .map(|c| {
+                let desc = c.comment.as_ref().map(|cc| format!(" OPTIONS(description=\"{}\")", cc.replace("\"", "\\\""))).unwrap_or_default();
+                format!("  {} {}{}", c.name, c.bq_type, desc)
+            })
+            .collect::<Vec<_>>().join(",\n");
 
-        let mut stored_cols = Vec::new();
-        for col in &metadata.columns {
-            if !col.is_virtual {
-                let col_ddl = format!("  {} {}", col.name, col.bq_type);
-                let options = if let Some(c) = &col.comment {
-                    format!(" OPTIONS(description=\"{}\")", c.replace("\"", "\\\""))
-                } else {
-                    String::new()
-                };
-                stored_cols.push(format!("{}{}", col_ddl, options));
-            }
-        }
+        let hash_column = if enable_row_hash { ",\n  ROW_HASH STRING NOT NULL OPTIONS(description=\"SHA256 hash for duplicate detection\")" } else { "" };
+        let primary_key = if !metadata.pk_cols.is_empty() { format!(",\n  PRIMARY KEY ({}) NOT ENFORCED", metadata.pk_cols.join(", ")) } else { "".to_string() };
 
-        ddl.push_str(&stored_cols.join(",\n"));
-        if enable_row_hash {
-            ddl.push_str(",\n  ROW_HASH STRING NOT NULL OPTIONS(description=\"SHA256 hash for duplicate detection\")");
-        }
-        if !metadata.pk_cols.is_empty() {
-            ddl.push_str(&format!(
-                ",\n  PRIMARY KEY ({}) NOT ENFORCED",
-                metadata.pk_cols.join(", ")
-            ));
-        }
-        ddl.push_str("\n)");
+        // Handle Partitioning (BigQuery's way of splitting data by day/month).
+        let partitioning = metadata.columns.iter()
+            .find(|c| metadata.partition_cols.contains(&c.name) && (c.bq_type.contains("DATE") || c.bq_type.contains("TIMESTAMP")))
+            .map(|c| format!("PARTITION BY {}", c.name)).unwrap_or_default();
 
-        // Partitioning
-        if !metadata.partition_cols.is_empty() {
-            // Find first date/timestamp col
-            if let Some(col) = metadata.columns.iter().find(|c| {
-                metadata.partition_cols.contains(&c.name)
-                    && (c.bq_type.contains("DATE") || c.bq_type.contains("TIMESTAMP"))
-            }) {
-                ddl.push_str(&format!("\nPARTITION BY {}", col.name));
-            }
-        }
+        // Handle Clustering (BigQuery's way of sorting data for faster searches).
+        let mut cluster_cols = metadata.pk_cols.clone();
+        for idx in &metadata.index_cols { if !cluster_cols.contains(idx) { cluster_cols.push(idx.clone()); } }
+        let clustering = if !cluster_cols.is_empty() {
+            format!("CLUSTER BY {}", cluster_cols[0..std::cmp::min(4, cluster_cols.len())].join(", "))
+        } else { "".to_string() };
 
-        // Clustering
-        let mut cluster_cols = Vec::new();
-        for pk in &metadata.pk_cols {
-            cluster_cols.push(pk.clone());
-        }
-        for idx in &metadata.index_cols {
-            if !cluster_cols.contains(idx) {
-                cluster_cols.push(idx.clone());
-            }
-        }
-        if !cluster_cols.is_empty() {
-            let count = std::cmp::min(4, cluster_cols.len());
-            ddl.push_str(&format!(
-                "\nCLUSTER BY {}",
-                cluster_cols[0..count].join(", ")
-            ));
-        }
+        // The View includes all columns + any virtual column logic.
+        let view_columns = metadata.columns.iter()
+            .map(|c| if c.is_virtual { format!("  CAST(`{}` AS STRING) AS {}", c.name, c.name) } else { format!("  {}", c.name) })
+            .collect::<Vec<_>>().join(",\n");
+        let view_hash = if enable_row_hash { ",\n  ROW_HASH" } else { "" };
 
-        ddl.push_str(";\n\n-- 2. Logical View\n");
-        ddl.push_str(&format!(
-            "CREATE OR REPLACE VIEW `{}.{}.{}` AS SELECT\n",
-            self.project_id, self.dataset_id, metadata.table_name
-        ));
-        let mut view_cols = Vec::new();
-        for col in &metadata.columns {
-            if col.is_virtual {
-                view_cols.push(format!(
-                    "  /* Virtual */ CAST(`{}` AS STRING) AS {}",
-                    col.name, col.name
-                ));
-            } else {
-                view_cols.push(format!("  {}", col.name));
-            }
-        }
-        if enable_row_hash {
-            view_cols.push("  ROW_HASH".to_string());
-        }
-        ddl.push_str(&view_cols.join(",\n"));
-        ddl.push_str(&format!(
-            "\nFROM `{}.{}.{}`;",
-            self.project_id, self.dataset_id, physical_name
-        ));
-
-        ddl
+        DDL_TEMPLATE
+            .replace("{project_id}", &self.project_id)
+            .replace("{dataset_id}", &self.dataset_id)
+            .replace("{physical_name}", &physical_name)
+            .replace("{table_name}", &metadata.table_name)
+            .replace("{column_definitions}", &column_definitions)
+            .replace("{hash_column}", hash_column)
+            .replace("{primary_key}", &primary_key)
+            .replace("{partitioning}", &partitioning)
+            .replace("{clustering}", &clustering)
+            .replace("{view_columns}", &view_columns)
+            .replace("{view_hash}", view_hash)
     }
 
-    /// Generates BigQuery Schema JSON for the `bq load` command.
-    fn generate_schema_json(
-        &self,
-        metadata: &TableMetadata,
-        enable_row_hash: bool,
-    ) -> serde_json::Value {
-        let mut fields = Vec::new();
-        for col in &metadata.columns {
-            if !col.is_virtual {
-                fields.push(json!({
-                    "name": col.name,
-                    "type": col.bq_type,
-                    "mode": "NULLABLE",
-                    "description": col.comment
-                }));
-            }
-        }
+    /// Generates BigQuery Schema JSON.
+    fn generate_schema_json(&self, metadata: &TableMetadata, enable_row_hash: bool) -> serde_json::Value {
+        let mut fields: Vec<_> = metadata.columns.iter()
+            .filter(|c| !c.is_virtual)
+            .map(|c| json!({"name": c.name, "type": c.bq_type, "mode": "NULLABLE", "description": c.comment}))
+            .collect();
         if enable_row_hash {
-            fields.push(json!({
-                "name": "ROW_HASH",
-                "type": "STRING",
-                "mode": "REQUIRED",
-                "description": "SHA256 hash for duplicate detection"
-            }));
+            fields.push(json!({"name": "ROW_HASH", "type": "STRING", "mode": "REQUIRED", "description": "SHA256 hash for duplicate detection"}));
         }
         json!(fields)
     }
 
     /// Generates a bash script with the `bq load` command.
     fn generate_load_command(&self, metadata: &TableMetadata, file_format: FileFormat) -> String {
-        match file_format {
-            FileFormat::Csv => format!(
-                r#"#!/bin/bash
-# BigQuery Load Command (CSV)
-set -e
-bq load --source_format=CSV --field_delimiter=$'\x10' --skip_leading_rows=1 --null_marker='' --replace --schema=schema.json {}:{}.{}_PHYSICAL "../data/*.csv.gz"
-"#,
-                self.project_id, self.dataset_id, metadata.table_name
-            ),
-            FileFormat::Parquet => format!(
-                r#"#!/bin/bash
-# BigQuery Load Command (PARQUET)
-set -e
-bq load --source_format=PARQUET --replace --schema=schema.json {}:{}.{}_PHYSICAL "../data/*.parquet"
-"#,
-                self.project_id, self.dataset_id, metadata.table_name
-            ),
-        }
-    }
-
-    /// Generates a reference Oracle SELECT statement for the table.
-    fn generate_export_sql(&self, metadata: &TableMetadata, enable_row_hash: bool) -> String {
-        let mut cols = Vec::new();
-        for col in &metadata.columns {
-            cols.push(format!("\"{}\"", col.name));
-        }
-        if enable_row_hash {
-            cols.push("ROW_HASH (computed)".to_string());
-        }
+        let (fmt, args, ext) = match file_format {
+            FileFormat::Csv => ("CSV", "--field_delimiter=$'\\x10' --skip_leading_rows=1 --null_marker=''", "*.csv.gz"),
+            FileFormat::Parquet => ("PARQUET", "", "*.parquet"),
+        };
         format!(
-            "-- Reference SQL\nSELECT {} FROM \"{}\".\"{}\";",
-            cols.join(", "),
-            metadata.schema,
-            metadata.table_name
+            "#!/bin/bash\n# BigQuery Load Command ({})\n# Run this from inside the config/ directory.\nset -e\nbq load --source_format={} {} --replace --schema=schema.json {}:{}.{}_PHYSICAL \"../data/{}\"\n",
+            fmt, fmt, args, self.project_id, self.dataset_id, metadata.table_name, ext
         )
     }
 }

@@ -1,17 +1,16 @@
-//! # Oracle Data Exporter for BigQuery (Rust)
+//! # Main Entry Point
 //!
-//! A high-performance, multi-threaded utility designed to migrate large-scale
-//! data from Oracle databases to BigQuery-ready compressed CSV files.
-//!
-//! This application follows the **Hexagonal Architecture** (Ports and Adapters)
-//! to maintain a strict separation between business logic and infrastructure.
+//! This is where the application starts. The `main` function coordinates:
+//! 1. **Configuration**: Parsing CLI arguments and loading YAML files.
+//! 2. **Infrastructure**: Initializing the Runtime (Connection Pools, Thread Pools).
+//! 3. **Dependency Injection**: Wiring up the Hexagonal components (Ports & Adapters).
+//! 4. **Execution**: Handing control to the `Orchestrator`.
 
 pub mod application;
 pub mod config;
 pub mod domain;
 pub mod infrastructure;
 pub mod ports;
-
 
 use crate::application::orchestrator::Orchestrator;
 use crate::config::{AppConfig, CliArgs};
@@ -20,131 +19,75 @@ use crate::infrastructure::oracle::extractor::Extractor;
 use crate::infrastructure::oracle::metadata::MetadataAdapter;
 use clap::Parser;
 use log::{error, info};
-use r2d2::Pool;
-use crate::infrastructure::oracle::connection_manager::OracleConnectionManager;
 use std::process;
 use std::sync::Arc;
 
+/// The application entry point.
+///
+/// We use `std::process::exit` to return non-zero exit codes on failure,
+/// which is important for shell scripts or CI/CD pipelines.
 fn main() {
-    // 1. Initialize Logging
+    // env_logger is a common Rust logger that reads the RUST_LOG environment variable.
     env_logger::init();
 
-    // 2. Parse Arguments
+    // Parse command-line arguments using the `clap` crate.
     let args = CliArgs::parse();
 
-    // 3. Load Config
+    // --- STEP 1: CONFIGURATION ---
+    // We try to load config from a YAML file first, then fallback to defaults.
     let mut config = if let Some(config_path) = &args.config {
-        match AppConfig::from_file(config_path) {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Failed to load config: {}", e);
-                process::exit(1);
-            }
-        }
+        AppConfig::from_file(config_path).unwrap_or_else(|e| {
+            error!("Failed to load config: {}", e);
+            process::exit(1);
+        })
     } else {
-        // Construct default config from CLI if no config file
         AppConfig::default_from_cli(&args)
     };
 
-    // Merge CLI overrides
+    // Merge CLI overrides (CLI arguments take precedence over YAML config).
     config.merge_cli(&args);
 
-    if let Err(e) = config.validate() {
+    // Validate that required fields (like DB credentials) are present.
+    config.validate().unwrap_or_else(|e| {
         error!("Invalid configuration: {}", e);
         process::exit(1);
-    }
+    });
 
-    // 3.5 Setup Parallelism
-    let cpu_percent = config.export.cpu_percent.unwrap_or(50);
-    let total_cpus = num_cpus::get();
-    let num_threads = if let Some(p) = config.export.parallel {
-        p
-    } else {
-        (total_cpus as f64 * (cpu_percent as f64 / 100.0)).ceil() as usize
-    };
-    let num_threads = std::cmp::max(1, num_threads);
-    info!(
-        "Initializing worker pool with {} threads (Target CPU: {}%)",
-        num_threads, cpu_percent
-    );
+    // --- STEP 2: RUNTIME INITIALIZATION ---
+    // The RuntimeContext manages resources like the Oracle connection pool and Rayon thread pool.
+    let runtime = crate::application::runtime::RuntimeContext::init(&config).unwrap_or_else(|e| {
+        error!("Runtime initialization failed: {}", e);
+        process::exit(1);
+    });
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .build_global()
-        .unwrap_or_else(|e| {
-            info!("Global thread pool already initialized: {}", e);
-        });
+    // --- STEP 3: COMPONENT WIRING (ports & adapters) ---
+    // In Hexagonal Architecture, we define "ports" (interfaces) and "adapters" (implementations).
+    // We wrap everything in `Arc` (Atomic Reference Counter) so they can be safely shared across threads.
 
-    // 4. Initialize Connection Pool
-    let conn_str = config.database.get_connection_string();
-    let password = config
-        .database
-        .password
-        .clone()
-        .or_else(|| std::env::var("ORACLE_PASSWORD").ok())
-        .unwrap_or_default();
+    // 1. Metadata Port: Handles querying Oracle for table list and column types.
+    let metadata_port = Arc::new(MetadataAdapter::new(runtime.pool.clone()));
 
-    info!("Initializing connection pool for {}...", conn_str);
-    let manager = OracleConnectionManager::new(
-        &config.database.username,
-        &password,
-        &conn_str,
-    );
-    
-    // Pool size = num_threads + 2 (buffer for metadata queries)
-    let pool_size = (num_threads + 2) as u32;
-    let pool = Arc::new(Pool::builder()
-        .max_size(pool_size)
-        .build(manager)
-        .unwrap_or_else(|e| {
-            error!("Failed to create connection pool: {}", e);
-            process::exit(1);
-        }));
-
-    // 5. Initialize Hexagonal Components
-    let metadata_port = Arc::new(MetadataAdapter::new(pool.clone()));
-
+    // 2. Extraction Port: Handles the heavy lifting of streaming rows to disk.
     let prefetch = config.export.prefetch_rows.unwrap_or(5000);
-    let delimiter_str = config
-        .export
-        .field_delimiter
-        .clone()
-        .unwrap_or_else(|| "\u{0010}".to_string());
+    let delimiter_str = config.export.field_delimiter.clone().unwrap_or_else(|| "\u{0010}".to_string());
     let field_delimiter = delimiter_str.as_bytes()[0];
+    let extraction_port = Arc::new(Extractor::new(runtime.pool, prefetch, field_delimiter));
 
-    let extraction_port = Arc::new(Extractor::new(
-        pool,
-        prefetch,
-        field_delimiter,
-    ));
-
-    // For local artifacts, we need project/dataset
-    let project_id = config
-        .bigquery
-        .as_ref()
-        .map(|b| b.project.clone())
-        .unwrap_or_else(|| "PRJ".to_string());
-    let dataset_id = config
-        .bigquery
-        .as_ref()
-        .map(|b| b.dataset.clone())
-        .unwrap_or_else(|| "DS".to_string());
-
+    // 3. Artifact Port: Generates BigQuery DDL and load scripts.
+    let project_id = config.bigquery.as_ref().map(|b| b.project.clone()).unwrap_or_else(|| "PRJ".to_string());
+    let dataset_id = config.bigquery.as_ref().map(|b| b.dataset.clone()).unwrap_or_else(|| "DS".to_string());
     let artifact_port = Arc::new(ArtifactAdapter::new(project_id, dataset_id));
 
-    // 5. Run Orchestrator
-    let orchestrator =
-        Orchestrator::new(metadata_port, extraction_port, artifact_port, config);
+    // --- STEP 4: ORCHESTRATION ---
+    // The Orchestrator doesn't know *how* to talk to Oracle or *how* to write files;
+    // it just knows the *process* of exporting data using the provided ports.
+    let orchestrator = Orchestrator::new(metadata_port, extraction_port, artifact_port, config);
 
     info!("Starting Export process...");
     match orchestrator.run() {
         Ok(results) => {
             let success_count = results.iter().filter(|r| r.status == "SUCCESS").count();
-            info!(
-                "Export finished. {}/{} tables successful.",
-                success_count,
-                results.len()
-            );
+            info!("Export finished. {}/{} tables successful.", success_count, results.len());
         }
         Err(e) => {
             error!("Orchestrator failed: {:?}", e);
