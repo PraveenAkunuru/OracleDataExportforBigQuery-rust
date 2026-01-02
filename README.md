@@ -96,7 +96,7 @@ The exporter performs high-fidelity type conversion to ensure Oracle data is rep
 | **`JSON`** (Native) | `JSON` | `Utf8` | Native BigQuery JSON support. |
 | `BLOB`, `RAW`, `BFILE` | `BYTES` | `Binary` | Binary data retention. |
 | `BOOLEAN` | `BOOL` | `Boolean` | Native flag support. |
-| `INTERVAL` | `INTERVAL` | `Duration` / `Utf8` | BigQuery-native Interval support. |
+| `INTERVAL` | `INTERVAL` | `Utf8` | Converted via `TO_CHAR` for BigQuery compatibility. |
 
 ---
 

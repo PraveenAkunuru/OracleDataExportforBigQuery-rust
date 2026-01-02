@@ -473,6 +473,8 @@ impl Extractor {
                 format!("SDO_UTIL.TO_WKTGEOMETRY(\"{}\")", name)
             } else if upper_type.contains("UROWID") || upper_type.contains("ROWID") {
                 format!("ROWIDTOCHAR(\"{}\")", name)
+            } else if upper_type.contains("INTERVAL") {
+                format!("TO_CHAR(\"{}\")", name)
             } else {
                 format!("\"{}\"", name)
             };
