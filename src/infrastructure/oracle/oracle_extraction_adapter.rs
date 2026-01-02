@@ -71,6 +71,7 @@ impl DataStreamer for OracleExtractionAdapter {
 }
 
 impl OracleExtractionAdapter {
+    /// Extracts data from a table and formats it as a Gzip-compressed CSV file.
     fn export_csv(&self, task: ExportTask) -> Result<TaskResult> {
         let start_time = Instant::now();
         let conn = self.get_conn()?;
@@ -135,6 +136,7 @@ impl OracleExtractionAdapter {
         ))
     }
 
+    /// Extracts data from a table and formats it as an Apache Parquet file.
     fn export_parquet(&self, task: ExportTask) -> Result<TaskResult> {
         let start_time = Instant::now();
         let conn = self.get_conn()?;
@@ -211,6 +213,7 @@ impl OracleExtractionAdapter {
         ))
     }
 
+    /// Writes a batch of rows to the Parquet file.
     fn write_batch(
         &self,
         writer: &mut ArrowWriter<File>,
@@ -237,6 +240,7 @@ impl OracleExtractionAdapter {
         Ok(())
     }
 
+    /// Maps a compression string to the corresponding Parquet compression codec.
     fn map_parquet_compression(&self, c: &Option<String>) -> ParquetCompression {
         match c.as_deref().unwrap_or("zstd").to_lowercase().as_str() {
             "snappy" => ParquetCompression::SNAPPY,
@@ -252,6 +256,7 @@ impl OracleExtractionAdapter {
 }
 
 impl OracleExtractionAdapter {
+    /// Prepares the SQL SELECT statement and retrieves mapped column names.
     fn prepare_query(&self, conn: &Connection, task: &ExportTask) -> Result<(String, Vec<String>)> {
         let virtual_map = get_virtual_columns_map(conn, &task.schema, &task.table);
 
@@ -342,6 +347,7 @@ impl OracleExtractionAdapter {
         Ok((sql, raw_names))
     }
 
+    /// Formats a single Oracle column value into a String representation.
     fn format_value(&self, row: &oracle::Row, i: usize, otype: &OracleType) -> Result<String> {
         match otype {
             OracleType::Number(_, _)
@@ -371,6 +377,7 @@ impl OracleExtractionAdapter {
         }
     }
 
+    /// Formats an Oracle `Timestamp` into a BigQuery-compatible TIMESTAMP string.
     fn format_timestamp(&self, ts: &Timestamp) -> String {
         format!(
             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",

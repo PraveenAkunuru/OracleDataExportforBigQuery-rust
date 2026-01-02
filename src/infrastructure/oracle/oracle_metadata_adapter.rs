@@ -261,6 +261,7 @@ impl SchemaReader for OracleMetadataAdapter {
 }
 
 impl OracleMetadataAdapter {
+    /// Queries the size of a table in Gigabytes using multiple fallback strategies.
     fn fetch_size(&self, conn: &Connection, schema: &str, table: &str) -> Result<f64> {
         let size_res = conn.query(SQL_SEGMENTS_SIZE, &[&schema, &table]);
         match size_res {
@@ -293,6 +294,7 @@ impl OracleMetadataAdapter {
         Ok(0.0)
     }
 
+    /// Discovers all columns for a table and maps them to BigQuery types.
     fn fetch_columns(
         &self,
         conn: &Connection,
@@ -377,6 +379,7 @@ impl OracleMetadataAdapter {
         Ok(final_cols)
     }
 
+    /// Fetches primary key column names for the specified table.
     fn fetch_pk(&self, conn: &Connection, schema: &str, table: &str) -> Result<Vec<String>> {
         let rows = conn
             .query(SQL_GET_PK, &[&schema, &table])
@@ -389,6 +392,7 @@ impl OracleMetadataAdapter {
         Ok(pks)
     }
 
+    /// Fetches partition key column names for the specified table.
     fn fetch_partitions(
         &self,
         conn: &Connection,
@@ -406,6 +410,7 @@ impl OracleMetadataAdapter {
         Ok(parts)
     }
 
+    /// Fetches all indexed column names for the specified table.
     fn fetch_indexes(&self, conn: &Connection, schema: &str, table: &str) -> Result<Vec<String>> {
         let rows = conn
             .query(SQL_GET_INDEXES, &[&schema, &table])
