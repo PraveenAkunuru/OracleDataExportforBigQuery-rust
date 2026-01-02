@@ -42,7 +42,7 @@ def check_export_verification(output_dir):
              print(f"             {mb_per_sec:.2f} MB/s")
     
     details = report.get('details', [])
-    failed_tables = [t for t in details if t['status'] == 'FAILURE']
+    failed_tables = [t for t in details if t['status'] == 'FAILED']
     
     if failed_tables:
         print("\n=== Failed Tables ===")

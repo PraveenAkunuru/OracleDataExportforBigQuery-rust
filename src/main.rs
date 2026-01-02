@@ -1,193 +1,202 @@
 //! # Oracle Data Exporter for BigQuery (Rust)
 //!
-//! This is the main entry point for the application.
-//! It handles argument parsing, configuration loading, and mode selection (Coordinator vs Worker).
+//! A high-performance, multi-threaded utility designed to migrate large-scale
+//! data from Oracle databases to BigQuery-ready compressed CSV files.
 //!
-//! ## Modes
-//! - **Coordinator Mode**: Activated via `--config` or when an output directory is specified.
-//!   Manages discovery, task planning, and worker thread orchestration.
-//! - **Ad-hoc Worker Mode**: Activated via `--table` and `--output` (file path).
-//!   Performs a direct single-threaded export of a specific table or chunk.
-//!
-//! ## Modules
-//! - `config`: Configuration structs and validation logic.
-//! - `coordinator`: Discovery and thread pool management.
-//! - `exporter`: Core Oracle-to-CSV export logic.
-//! - `metadata`: Database metadata queries (schema, size, chunks).
-//! - `validation`: Data validation logic (row counts, checksums).
-//! - `artifacts`: Generators for DDL, JSON schemas, and SQL scripts.
-//! - `sql_utils`: Centralized SQL generation utilities (hashing, parity).
-//! - `bigquery`: BigQuery type mapping and schema generation.
+//! This application follows the **Hexagonal Architecture** (Ports and Adapters)
+//! to maintain a strict separation between business logic and infrastructure.
 
-// MODULES
-mod oracle_data_extractor;
-mod config;
-mod oracle_metadata;
-mod export_coordinator;
-mod bigquery_schema_mapper;
-mod data_validator;
-mod artifact_generator;
-mod sql_generator_utils;
-pub mod bigquery_ingestion;
-pub mod gcp;
+pub mod application;
+pub mod config;
+pub mod domain;
+pub mod infrastructure;
+pub mod ports;
 
-use clap::Parser;
-// ... (lines omitted)
+use crate::domain::entities::FileFormat;
 
-use log::{info, error};
-use std::process;
+use crate::application::orchestrator::Orchestrator;
 use crate::config::{AppConfig, CliArgs};
-use crate::export_coordinator::Coordinator;
-use crate::oracle_data_extractor::ExportParams;
+use crate::infrastructure::storage::fs_adapter::FsAdapter;
+use crate::infrastructure::oracle::extractor::Extractor;
+use crate::infrastructure::oracle::metadata::MetadataAdapter;
+use clap::Parser;
+use log::{error, info};
+use r2d2::Pool;
+use crate::infrastructure::oracle::connection_manager::OracleConnectionManager;
+use std::process;
+use std::sync::Arc;
 
 fn main() {
     // 1. Initialize Logging
     env_logger::init();
-    
+
     // 2. Parse Arguments
     let args = CliArgs::parse();
 
-    // 3. Determine Mode
-    //    If --config is passed, or we look like we want full coordination (output is dir, schema specified, etc.)
-    //    If --output ends with .csv.gz, unlikely to be coordination dir.
-    
-    // Priority:
-    // A. Config File -> Coordinator
-    // B. Explicit Table + File Output -> Ad-hoc Worker (Old behavior)
-    // C. Schema/Table + Dir Output -> Coordinator (Ad-hoc)
-
-    if let Some(config_path) = &args.config {
-        // COORDINATOR MODE (via Config File)
-        info!("Running in Coordinator Mode with config: {}", config_path);
-        let mut config = match AppConfig::from_file(config_path) {
+    // 3. Load Config
+    let mut config = if let Some(config_path) = &args.config {
+        match AppConfig::from_file(config_path) {
             Ok(c) => c,
             Err(e) => {
                 error!("Failed to load config: {}", e);
                 process::exit(1);
             }
-        };
-        // Allow CLI override
-        config.merge_cli(&args);
-        
-        if let Err(e) = config.validate() {
-            error!("Invalid configuration: {}", e);
-            process::exit(1);
-        }
-        
-        let coord = Coordinator::new(config);
-        if let Err(e) = coord.run() {
-            error!("Coordinator failed: {}", e);
-            process::exit(1);
         }
     } else {
-        // NO Config File. Check CLI args.
-        // If we have table + output file -> Worker Mode
-        if let (Some(table), Some(output)) = (&args.table, &args.output) {
-             if output.ends_with(".csv.gz") || output.ends_with(".csv") {
-                 // WORKER MODE
-                 info!("Running in Ad-hoc Worker Mode for table: {}", table);
-                 
-                 // We need creds
-                 if args.username.is_none() || args.host.is_none() || args.service.is_none() {
-                     error!("Missing required DB args (username, host, service) for ad-hoc mode");
-                     process::exit(1);
-                 }
-                 
-                 // Handle password safely
-                 let password = args.password.clone().or_else(|| std::env::var("ORACLE_PASSWORD").ok()).unwrap_or_default();
-                 if password.is_empty() {
-                     // In real app, prompt. In Docker, fail.
-                     error!("Password required (CLI or ORACLE_PASSWORD env)");
-                     process::exit(1);
-                 }
-                 
-                 let (schema, table_only) = if table.contains('.') {
-                     let parts: Vec<&str> = table.split('.').collect();
-                     (parts[0].to_uppercase(), parts[1].to_uppercase())
-                 } else {
-                     (args.username.as_ref().unwrap().to_uppercase(), table.to_uppercase())
-                 };
-                 
-                 let params = ExportParams {
-                     connection_string: format!("//{}:{}/{}", 
-                        args.host.as_ref().unwrap(), 
-                        args.port.unwrap_or(1521), 
-                        args.service.as_ref().unwrap()
-                     ),
-                     username: args.username.as_ref().unwrap().clone(),
-                     password,
-                     output_file: output.clone(),
-                     prefetch_rows: 5000,
-                     schema,
-                     table: table_only,
-                     query_where: args.query_where.clone(),
-                     enable_row_hash: false,
-                     use_client_hash: false,
-                     field_delimiter: "\u{0010}".to_string(),
-                 };
-                 
-                 if let Err(e) = crate::oracle_data_extractor::export_table(params) {
-                     error!("Export failed: {}", e);
-                     process::exit(1);
-                 }
-                 
-             } else {
-                 // Output is likely a Directory? -> Ad-hoc Coordinator
-                 // Implementation optional for now. Let's redirect to usage help or minimal coordinator.
-                 info!("Output does not look like a file. Assuming Coordinator Mode.");
-                 
-                 // Construct minimal config
-                 if args.username.is_none() || args.host.is_none() {
-                     error!("Missing required DB args");
-                     process::exit(1);
-                 }
-                 
-                 let password = args.password.clone().or_else(|| std::env::var("ORACLE_PASSWORD").ok()).unwrap_or_default();
-                 
-                 let config = AppConfig {
-                     database: crate::config::DatabaseConfig {
-                         username: args.username.as_ref().unwrap().clone(),
-                         password: Some(password),
-                         host: args.host.as_ref().unwrap().clone(),
-                         port: args.port.unwrap_or(1521),
+        // Construct default config from CLI if no config file
+        AppConfig::default_from_cli(&args)
+    };
 
-                         service: args.service.as_ref().unwrap_or(&"FREEPDB1".to_string()).clone(),
-                         connection_string: None,
-                     },
-                     export: crate::config::ExportConfig {
-                         output_dir: output.clone(),
-                         schema: None, // Will use DB user
-                         table: Some(table.clone()),
-                         parallel: args.parallel,
-                         prefetch_rows: Some(5000),
-                         exclude_tables: None,
-                         enable_row_hash: None,
-                         cpu_percent: args.cpu_percent,
-                         field_delimiter: None,
-                         schemas: None,
-                         schemas_file: None,
-                         tables: None,
-                          tables_file: None,
-                          load_to_bq: Some(args.load),
-                          use_client_hash: None,
-                          adaptive_parallelism: None,
-                          target_throughput_per_core: None,
-                     },
-                     bigquery: None,
-                     gcp: None,
-                 };
-                 
-                 let coord = Coordinator::new(config);
-                 if let Err(e) = coord.run() {
-                     error!("Coordinator failed: {}", e);
-                     process::exit(1);
-                 }
-             }
-        } else {
-            error!("Invalid mode. Please provide --config OR --table and --output.");
-            use clap::CommandFactory;
-            let _ = CliArgs::command().print_help();
+    // Merge CLI overrides
+    config.merge_cli(&args);
+
+    if let Err(e) = config.validate() {
+        error!("Invalid configuration: {}", e);
+        process::exit(1);
+    }
+
+    // 3.5 Setup Parallelism
+    let cpu_percent = config.export.cpu_percent.unwrap_or(50);
+    let total_cpus = num_cpus::get();
+    let num_threads = if let Some(p) = config.export.parallel {
+        p
+    } else {
+        (total_cpus as f64 * (cpu_percent as f64 / 100.0)).ceil() as usize
+    };
+    let num_threads = std::cmp::max(1, num_threads);
+    info!(
+        "Initializing worker pool with {} threads (Target CPU: {}%)",
+        num_threads, cpu_percent
+    );
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .build_global()
+        .unwrap_or_else(|e| {
+            info!("Global thread pool already initialized: {}", e);
+        });
+
+    // 4. Initialize Connection Pool
+    let conn_str = config.database.get_connection_string();
+    let password = config
+        .database
+        .password
+        .clone()
+        .or_else(|| std::env::var("ORACLE_PASSWORD").ok())
+        .unwrap_or_default();
+
+    info!("Initializing connection pool for {}...", conn_str);
+    let manager = OracleConnectionManager::new(
+        &config.database.username,
+        &password,
+        &conn_str,
+    );
+    
+    // Pool size = num_threads + 2 (buffer for metadata queries)
+    let pool_size = (num_threads + 2) as u32;
+    let pool = Arc::new(Pool::builder()
+        .max_size(pool_size)
+        .build(manager)
+        .unwrap_or_else(|e| {
+            error!("Failed to create connection pool: {}", e);
             process::exit(1);
+        }));
+
+    // 5. Initialize Hexagonal Components
+    let metadata_port = Arc::new(MetadataAdapter::new(pool.clone()));
+
+    let prefetch = config.export.prefetch_rows.unwrap_or(5000);
+    let delimiter_str = config
+        .export
+        .field_delimiter
+        .clone()
+        .unwrap_or_else(|| "\u{0010}".to_string());
+    let delimiter = delimiter_str.as_bytes()[0];
+
+    let extraction_port = Arc::new(Extractor::new(
+        pool,
+        prefetch,
+        delimiter,
+    ));
+
+    // For local artifacts, we need project/dataset
+    let project_id = config
+        .bigquery
+        .as_ref()
+        .map(|b| b.project.clone())
+        .unwrap_or_else(|| "PRJ".to_string());
+    let dataset_id = config
+        .bigquery
+        .as_ref()
+        .map(|b| b.dataset.clone())
+        .unwrap_or_else(|| "DS".to_string());
+
+    let storage_port = Arc::new(FsAdapter::new(project_id, dataset_id));
+
+    // 5. Run Orchestrator
+    let orchestrator =
+        Orchestrator::new(metadata_port, extraction_port, storage_port, config);
+
+    info!("Starting Export process...");
+    match orchestrator.run() {
+        Ok(results) => {
+            let success_count = results.iter().filter(|r| r.status == "SUCCESS").count();
+            info!(
+                "Export finished. {}/{} tables successful.",
+                success_count,
+                results.len()
+            );
+        }
+        Err(e) => {
+            error!("Orchestrator failed: {:?}", e);
+            process::exit(1);
+        }
+    }
+}
+
+// Add a helper to AppConfig to create a default from CLI
+impl AppConfig {
+    fn default_from_cli(args: &CliArgs) -> Self {
+        Self {
+            database: crate::config::DatabaseConfig {
+                username: args.username.clone().unwrap_or_default(),
+                password: args.password.clone(),
+                host: args.host.clone().unwrap_or_default(),
+                port: args.port.unwrap_or(1521),
+                service: args.service.clone().unwrap_or_default(),
+                connection_string: None,
+            },
+            export: crate::config::ExportConfig {
+                output_dir: args.output.clone().unwrap_or_else(|| ".".to_string()),
+                schema: None,
+                table: args.table.clone(),
+                parallel: args.parallel,
+                prefetch_rows: Some(5000),
+                exclude_tables: None,
+                enable_row_hash: None,
+                cpu_percent: args.cpu_percent,
+                field_delimiter: None,
+                schemas: None,
+                schemas_file: args.schemas_file.clone(),
+                tables: None,
+                tables_file: args.tables_file.clone(),
+                load_to_bq: Some(args.load),
+                use_client_hash: None,
+                adaptive_parallelism: None,
+                target_throughput_per_core: None,
+                file_format: args
+                    .format
+                    .as_ref()
+                    .map(|f| match f.to_lowercase().as_str() {
+                        "csv" => FileFormat::Csv,
+                        "parquet" => FileFormat::Parquet,
+                        _ => FileFormat::Csv,
+                    }),
+                parquet_compression: args.compression.clone(),
+                parquet_batch_size: args.parquet_batch_size,
+            },
+            bigquery: None,
+            gcp: None,
         }
     }
 }

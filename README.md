@@ -1,94 +1,128 @@
 # Oracle Data Exporter for BigQuery (Rust)
 
-A high-performance, multi-threaded tool to export Oracle tables to BigQuery-ready compressed CSVs. It handles type mapping, parallel chunking, and validation automatically.
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## 🚀 Getting Started
+A high-performance, single-binary utility for migrating large-scale Oracle databases to BigQuery. Built with Rust for maximum performance, memory safety, and minimal deployment footprint.
 
-### Linux (RHEL/CentOS/Ubuntu)
-1.  **Download** the release tarball to your server.
-2.  **Extract** and enter the directory:
-    ```bash
-    tar -xzvf oracle_exporter_dist.tar.gz
-    cd oracle_exporter_dist
-    ```
-3.  **Run** using the wrapper script (sets up library paths for you):
-    ```bash
-    ./run.sh --help
-    ```
+## 🌟 Key Features
 
-### Windows
-1.  **Download** the release zip.
-2.  **Extract** to a folder (e.g., `C:\oracle_exporter`).
-3.  **Install** [Oracle Instant Client Basic Lite](https://www.oracle.com/database/technologies/instant-client/downloads.html) and add it to your `PATH`.
-4.  **Run** via PowerShell:
-    ```powershell
-    .\oracle_rust_exporter.exe --help
-    ```
+*   **⚡ Blazing Fast Extraction**: Multi-threaded streaming from Oracle direct to Gzip-compressed CSV or Apache Parquet.
+*   **📦 Modern File Formats**: Full support for **Apache Parquet** with parameterized compression (ZSTD, Snappy, Gzip, LZ4).
+*   **🧩 Intelligent Parallel Chunking**: Automatically splits large tables (>1GB) into parallel chunks using `ROWID` ranges for maximum throughput.
+*   **🏗️ Hexagonal Architecture**: Clean separation of concerns between business logic and database infrastructure.
+*   **💎 Virtual Column Support**: Automatically handles Oracle virtual columns via a **Physical Table / Logical View split** in BigQuery.
+*   **🌍 Spatial Data Support**: Converts `SDO_GEOMETRY` to WKT/Geography automatically.
+*   **🛡️ Idempotency & Resiliency**: Built-in resume capability—already exported chunks are skipped automatically.
+*   **📊 Comprehensive Reporting**: Generates detailed JSON reports with MB/s, row counts, and error details.
+*   **⚙️ Adaptive Resource Management**: Throttles parallelism based on Oracle server CPU load or user-defined limits.
 
 ---
 
-## 🛠 Common Tasks
+## 🚀 Getting Started
 
-### 1. Run a Full Export
-The best way to run production exports is using a configuration file.
+### Prerequisites
 
-1.  Create `config.yaml` (see [example](tests/configs/integration/config_perf_client_hash.yaml)):
+*   **Oracle Instant Client**: The exporter requires Oracle shared libraries.
+*   **Network**: Access to the Oracle listener (usually port 1521).
+
+### Quick Start (Linux)
+
+1.  **Run with Wrapper Script**:
+    The provided `run.sh` automatically sets up `LD_LIBRARY_PATH`.
+    ```bash
+    ./run.sh --username HR --password hr --host db-server --service ORCLPDB --table HR.EMPLOYEES --output ./output
+    ```
+
+2.  **Using a Config File (Recommended)**:
+    Create a `config.yaml`:
     ```yaml
     database:
-      username: "HR"
-      password: "password"
-      host: "192.168.1.10"
-      service: "ORCL"
+      username: "SYSTEM"
+      password: "*****"
+      host: "localhost"
+      port: 1521
+      service: "FREEPDB1"
     export:
       output_dir: "./exports"
       schemas: ["HR", "SALES"]
+      cpu_percent: 80  # Use 80% of available CPU cores
     ```
-2.  Run the exporter:
+    Execute:
     ```bash
     ./run.sh --config config.yaml
     ```
 
-### 2. Run a Single Table (Ad-Hoc)
-You don't need a config file for quick exports. You can use CLI arguments.
-
-**Command**:
-```bash
-./run.sh \
-  --username SYSTEM --password manager \
-  --host localhost --service ORCLPDB \
-  --table HR.EMPLOYEES \
-  --output ./exports/hr_employees
-```
-*Note: This output mode (`--output ./dir`) activates the Coordinator, enabling parallel chunking for large tables.*
-
-### 3. Resuming a Failed Export
-The exporter is **idempotent**. 
-If a job fails (e.g., network disconnect), just **run the exact same command again**.
-
--   It automatically checks for existing `*.csv.gz` files.
--   **Skips** chunks that are already on disk.
--   **Retries** chunks that are missing.
--   **Retries** chunks that are missing.
-
-### 4. Advanced Features Support
-The exporter automatically handles complex Oracle scenarios:
-
-*   **Virtual Columns**: Detected and exported via a **Physical Table / Logical View** split in BigQuery.
-    *   Data is stored in `_PHYSICAL` table (excluding virtual columns).
-    *   Logic is restored in the `VIEW` (e.g., `TOTAL_COST` as `QUANTITY * PRICE`).
-*   **Spatial Data (`SDO_GEOMETRY`)**:
-    *   Extracted as **WKT** (Well-Known Text).
-    *   BigQuery View automatically converts it to `GEOGRAPHY` type.
-*   **Adaptive Parallelism**:
-    *   Automatically throttles concurrency based on **Oracle Server load** to prevent database saturation.
-    *   Just remove `parallel` from your config to enable.
 ---
 
-## 📚 Documentation
-For deep dives, architecture explanations, and tuning guides, see:
+## 🛠️ Advanced Usage
 
--   **[ARCHITECTURE.md](ARCHITECTURE.md)**: The Master Reference.
-    -   **Architecture Map**: Codebase structure.
-    -   **Performance Tuning**: Handling slow networks & CPU.
-    -   **Operational Handbook**: Verification & Maintenance.
-    -   **Deployment Strategy**: How the "Zero-Install" build works.
+### 1. Table Filtering & Exclusion
+Filter tables directly in your config:
+```yaml
+export:
+  tables: ["EMPLOYEES", "DEPARTMENTS"] # Only these
+  exclude_tables: ["TEMP_LOGS", "BACKUP_%"] # Exclude these (supports globs)
+```
+
+### 2. Row Hashing (Data Integrity)
+Enable row-level hashing to detect duplicates or changes:
+```yaml
+export:
+  enable_row_hash: true
+  use_client_hash: true # Calculate hash in Rust (saves Oracle CPU)
+```
+
+### Format & Compression
+| Argument | Description | Allowed Values |
+|----------|-------------|----------------|
+| `--format` | Output file format | `csv` (default), `parquet` |
+| `--compression` | Compression codec | `zstd` (default for Parquet), `snappy`, `gzip`, `lz4`, `none` |
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--parallel` | Fixed number of threads | CPU count |
+| `--cpu-percent` | Percentage of host CPUs to use | 100 |
+| `--prefetch-rows` | Rows to buffer from Oracle | 5000 |
+
+---
+
+## 🔍 Understanding the Artifacts
+
+For every table exported, the utility creates:
+1.  **`data/`**: Compressed `*.csv.gz` or `*.parquet` files (chunks).
+2.  **`config/schema.json`**: BigQuery-compatible schema definition.
+3.  **`config/bigquery.ddl`**: SQL script to create the table and logical view.
+4.  **`config/load_command.sh`**: A ready-to-use `bq load` bash script (automatically configured for CSV or PARQUET).
+5.  **`config/metadata.json`**: Full technical details of the source table.
+
+---
+
+## 🏗️ Architecture
+
+This project follows **Hexagonal Architecture**. 
+-   **Domain**: Data types and mapping logic (`src/domain/`).
+-   **Application**: The `ExportOrchestrator` (`src/application/`).
+-   **Ports**: Trait interfaces for I/O (`src/ports/`).
+-   **Infrastructure**: Concrete adapters for Oracle and Local Storage (`src/infrastructure/`).
+
+For more details, see **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+
+---
+
+## 🧪 Testing
+
+We provide a comprehensive Docker-based integration suite.
+```bash
+./run_docker_test.sh
+```
+This spawns a real Oracle 23c instance, populates complex types, and runs the full exporter suite.
+
+---
+
+## 📜 License
+Distributed under the MIT License. See `LICENSE` for more information.
+
+---
+**Maintained by**: Praveen Akunuru
+**Target**: Oracle 11g, 12c, 19c, 21c, 23c -> Google BigQuery

@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # Configuration
 DIST_DIR="dist"
@@ -62,7 +62,7 @@ docker run --rm \
 # 5. Assemble Bundle
 echo "-> Assembling Bundle..."
 cp target_centos7/release/oracle_rust_exporter "$DIST_DIR/"
-cp config_full.yaml "$DIST_DIR/config_template.yaml"
+cp config.yaml "$DIST_DIR/config_template.yaml"
 
 # Create run.sh wrapper
 cat > "$DIST_DIR/run.sh" << 'EOF'
@@ -71,7 +71,7 @@ cat > "$DIST_DIR/run.sh" << 'EOF'
 APP_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Set LD_LIBRARY_PATH to include our bundled lib/ dir
-export LD_LIBRARY_PATH="$APP_ROOT/lib:$LD_LIBRARY_PATH"
+export LD_LIBRARY_PATH="$APP_ROOT/lib:${LD_LIBRARY_PATH:-}"
 
 # Run the binary
 exec "$APP_ROOT/oracle_rust_exporter" "$@"
