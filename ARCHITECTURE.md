@@ -59,12 +59,15 @@ Implemented in [`extractor.rs`](src/infrastructure/oracle/extractor.rs):
 
 ## 📈 Benchmarks (Oracle 23c Docker Environment)
 
-The following metrics represent real-world performance verified in the integration test environment (Table: `ALL_TYPES_TEST2`, ~8M rows):
+The following metrics represent performance verified in the integration test environment (Table: `ALL_TYPES_TEST2`, ~8M rows). 
+
+> [!NOTE]
+> **Throughput Metrics**: MB/s is calculated based on the **compressed output volume** written to disk. Because Gzip (CSV) is consistently more "dense" than Snappy (Parquet) for Oracle text data, it processes significantly more rows to generate the same output volume.
 
 | Format | Throughput (MB/s) | Throughput (Rows/s) | CPU Usage |
 | :--- | :--- | :--- | :--- |
-| **CSV (Gzip)** | **18.8 MB/s** | ~63,000 | Moderate (Gzip limit) |
-| **Parquet** | **17.0 MB/s** | ~26,000 | High (Arrow Serialization) |
+| **CSV (Gzip)** | **18.8 MB/s** | **63,000** | Moderate (Gzip limit) |
+| **Parquet** | **17.0 MB/s** | **26,000** | High (Arrow Serialization) |
 
 ---
 
