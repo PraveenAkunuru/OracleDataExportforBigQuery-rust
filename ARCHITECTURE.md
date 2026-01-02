@@ -23,34 +23,35 @@ The application is structured to strictly decouple business orchestration from e
 ### 3. Ports (`src/ports/`)
 *   **Role**: Dependency inversion contracts (Traits).
 *   **Interfaces**:
-    *   `MetadataPort`: Contract for metadata discovery and schema reading.
-    *   `ExtractionPort`: Contract for row-level data extraction.
-    *   `StoragePort`: Contract for writing sidecar artifacts (DDL, JSON).
+    *   [`metadata_port.rs`](src/ports/metadata_port.rs): Contract for metadata discovery and schema reading (`MetadataPort`).
+    *   [`extraction_port.rs`](src/ports/extraction_port.rs): Contract for row-level data extraction (`ExtractionPort`).
+    *   [`storage_port.rs`](src/ports/storage_port.rs): Contract for writing sidecar artifacts (`StoragePort`).
 
 ### 4. Infrastructure Layer (`src/infrastructure/`)
 *   **Role**: Implementation of Ports using specific technologies.
 *   **Adapters**:
-    *   `MetadataAdapter`: Queries Oracle dictionary views (`ALL_TAB_COLS`, etc.) with multi-layered fallback for size discovery.
-    *   `Extractor`: Handles high-performance streaming to CSV or native Parquet.
-    *   `FsAdapter`: Generates DDL, Schema JSON, and Load scripts on the local filesystem.
-    *   `ConnectionManager`: Implements `r2d2` connection pooling for stable multi-threaded access.
+    *   [`metadata.rs`](src/infrastructure/oracle/metadata.rs): Queries Oracle dictionary views (`ALL_TAB_COLS`, etc.) with multi-layered fallback for size discovery.
+    *   [`extractor.rs`](src/infrastructure/oracle/extractor.rs): Handles high-performance streaming to CSV or native Parquet.
+    *   [`fs_adapter.rs`](src/infrastructure/storage/fs_adapter.rs): Generates DDL, Schema JSON, and Load scripts on the local filesystem.
+    *   [`connection_manager.rs`](src/infrastructure/oracle/connection_manager.rs): Implements `r2d2` connection pooling for stable multi-threaded access.
 
 ---
 
 ## ⚡ Performance Strategies
 
 ### 1. Connection Pooling (R2D2)
-To maximize throughput without overwhelming the Oracle listener, the exporter uses an internal connection pool:
+To maximize throughput without overwhelming the Oracle listener, the exporter uses an internal connection pool implemented in [`connection_manager.rs`](src/infrastructure/oracle/connection_manager.rs):
 -   **Stable Parallelism**: Threads pull connections from the pool as needed.
 -   **Resource Safety**: Prevents "too many sessions" errors during large-scale parallel exports.
 
 ### 2. Parallel Chunking (DBMS_PARALLEL_EXECUTE)
-For large tables, the exporter triggers a chunked export strategy:
--   Uses `DBMS_PARALLEL_EXECUTE.CREATE_CHUNKS_BY_ROWID` for physical range splitting.
+For large tables, the exporter triggers a chunked export strategy coordinated by the [`orchestrator.rs`](src/application/orchestrator.rs):
+-   Uses `DBMS_PARALLEL_EXECUTE.CREATE_CHUNKS_BY_ROWID` via [`metadata.rs`](src/infrastructure/oracle/metadata.rs).
 -   **Resilient Cleanup**: Chunks are cleaned up immediately after metadata fetch via an internal closure-wrap to ensure no stale tasks remain in Oracle.
 -   **Size Fallback**: If `ALL_SEGMENTS` is inaccessible, it falls back to `USER_SEGMENTS` and then to table statistics.
 
 ### 3. Zero-Copy Native Parquet
+Implemented in [`extractor.rs`](src/infrastructure/oracle/extractor.rs):
 -   **Arrow Batching**: Oracle rows are streamed directly into Arrow arrays.
 -   **No Intermediate Text**: Data maps directly from Oracle OCI buffers to binary Parquet blocks, maximizing MB/s.
 
@@ -70,17 +71,17 @@ The following metrics represent real-world performance verified in the integrati
 ## 🛡️ Resiliency Features
 
 ### 1. DATA_DEFAULT Protection
-Oracle virtual columns are backed by `LONG` columns in the dictionary. The exporter monitors the length of these expressions and warns if they approach or exceed the 32KB truncation limit, ensuring schema data integrity.
+Oracle virtual columns are backed by `LONG` columns in the dictionary. The exporter (via [`metadata.rs`](src/infrastructure/oracle/metadata.rs)) monitors the length of these expressions and warns if they approach or exceed the 32KB truncation limit.
 
 ### 2. Contextual Error Reporting
-Errors are enriched with `table_name` and `chunk_id` context as they bubble up through the hexagonal layers, allowing for precise debugging in large-scale migrations.
+Errors defined in [`errors.rs`](src/domain/errors.rs) are enriched with `table_name` and `chunk_id` context as they bubble up through the hexagonal layers.
 
 ---
 
 ## 🔍 Specialized Data Handling
 
 ### Virtual Columns
-The exporter re-implements Oracle virtual columns as **BigQuery Views**, ensuring logic parity between the source and target.
+The exporter re-implements Oracle virtual columns as **BigQuery Views**, ensuring logic parity. Mapping rules are defined in [`mapping.rs`](src/domain/mapping.rs).
 
 ### Spatial Data (`SDO_GEOMETRY`)
 Spatial data is extracted via `SDO_UTIL.TO_WKTGEOMETRY` and cast to BigQuery `GEOGRAPHY`.
@@ -89,5 +90,5 @@ Spatial data is extracted via `SDO_UTIL.TO_WKTGEOMETRY` and cast to BigQuery `GE
 
 ## 🛠️ Maintainer Notes
 
-*   **Adding a Type**: Update `map_oracle_to_arrow` in `mapping.rs`.
-*   **Integration Testing**: Run `tests/scripts/run_all.sh` to execute the full 360-degree verification suite.
+*   **Adding a Type**: Update `map_oracle_to_arrow` in [`mapping.rs`](src/domain/mapping.rs).
+*   **Integration Testing**: Run [`tests/scripts/run_all.sh`](tests/scripts/run_all.sh) to execute the full 360-degree verification suite.
