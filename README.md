@@ -1,7 +1,7 @@
 # Oracle Data Exporter for BigQuery (Rust)
 
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 A high-performance, single-binary utility for migrating large-scale Oracle databases to BigQuery. Built with Rust for maximum performance, memory safety, and minimal deployment footprint.
 
@@ -143,7 +143,7 @@ bash tests/scripts/run_all.sh
 ---
 
 ## 📜 License
-MIT License.
+Apache License 2.0. See [LICENSE](LICENSE) for more information.
 
 **Maintained by**: Praveen Akunuru
 **Target**: Oracle 11g+ -> Google BigQuery
