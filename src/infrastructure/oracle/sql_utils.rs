@@ -18,7 +18,7 @@
 //! and ensuring SQL compatibility across different Oracle data types.
 
 /// Securely wraps identifiers in double quotes and escapes existing quotes to prevent SQL injection.
-fn quote_ident(ident: &str) -> String {
+pub fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 

@@ -255,7 +255,10 @@ impl MetadataPort for MetadataAdapter {
         info!("Validating {}.{}", schema, table);
 
         // Row count is the most basic check.
-        let count_sql = format!("SELECT COUNT(*) FROM \"{}\".\"{}\"", schema, table);
+        let count_sql = format!("SELECT COUNT(*) FROM {}.{}",
+            sql_utils::quote_ident(schema),
+            sql_utils::quote_ident(table)
+        );
         let row_count: u64 = conn
             .query_row(&count_sql, &[])
             .map_err(|e| ExportError::OracleError(e.to_string()))?
@@ -267,17 +270,19 @@ impl MetadataPort for MetadataAdapter {
         if let Some(pks) = pk_cols {
             if !pks.is_empty() {
                 let hash_expr = if pks.len() == 1 {
-                    format!("\"{}\"", pks[0])
+                    sql_utils::quote_ident(&pks[0])
                 } else {
                     pks.iter()
-                        .map(|c| format!("\"{}\"", c))
+                        .map(|c| sql_utils::quote_ident(c))
                         .collect::<Vec<_>>()
                         .join(" || '_' || ")
                 };
 
                 let hash_sql = format!(
-                    "SELECT SUM(ORA_HASH({})) FROM \"{}\".\"{}\"",
-                    hash_expr, schema, table
+                    "SELECT SUM(ORA_HASH({})) FROM {}.{}",
+                    hash_expr,
+                    sql_utils::quote_ident(schema),
+                    sql_utils::quote_ident(table)
                 );
                 match conn.query_row(&hash_sql, &[]) {
                     Ok(row) => {
@@ -293,7 +298,11 @@ impl MetadataPort for MetadataAdapter {
         if let Some(cols) = agg_cols {
             let mut agg_results = Vec::new();
             for col in cols {
-                let agg_sql = format!("SELECT SUM(\"{}\") FROM \"{}\".\"{}\"", col, schema, table);
+                let agg_sql = format!("SELECT SUM({}) FROM {}.{}",
+                    sql_utils::quote_ident(col),
+                    sql_utils::quote_ident(schema),
+                    sql_utils::quote_ident(table)
+                );
                 if let Ok(row) = conn.query_row(&agg_sql, &[]) {
                     if let Ok(Some(v)) = row.get::<usize, Option<String>>(0) {
                         agg_results.push(crate::domain::entities::ColumnAggregate {
@@ -412,12 +421,12 @@ impl MetadataAdapter {
         // THE TRICK: We run a "SELECT ... WHERE 1=0" query.
         // This doesn't return any rows, but it DOES return the "Column Info"
         // which tells us exactly what Oracle internal types these columns are.
-        let quoted_names: Vec<String> = entries.iter().map(|e| format!("\"{}\"", e.name)).collect();
+        let quoted_names: Vec<String> = entries.iter().map(|e| sql_utils::quote_ident(&e.name)).collect();
         let sql_dummy = format!(
-            "SELECT {} FROM \"{}\".\"{}\" WHERE 1=0",
+            "SELECT {} FROM {}.{} WHERE 1=0",
             quoted_names.join(", "),
-            schema,
-            table
+            sql_utils::quote_ident(schema),
+            sql_utils::quote_ident(table)
         );
         let mut stmt = conn
             .statement(&sql_dummy)
