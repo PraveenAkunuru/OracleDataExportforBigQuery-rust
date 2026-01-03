@@ -21,3 +21,6 @@ bench_test/
 bench_test_parquet/
 bench_types_csv/
 bench_types_parquet/
+export_full_doc_test/
+export_parquet_test/
+schemas.txt
