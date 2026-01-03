@@ -255,7 +255,8 @@ impl MetadataPort for MetadataAdapter {
         info!("Validating {}.{}", schema, table);
 
         // Row count is the most basic check.
-        let count_sql = format!("SELECT COUNT(*) FROM {}.{}",
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM {}.{}",
             sql_utils::quote_ident(schema),
             sql_utils::quote_ident(table)
         );
@@ -298,7 +299,8 @@ impl MetadataPort for MetadataAdapter {
         if let Some(cols) = agg_cols {
             let mut agg_results = Vec::new();
             for col in cols {
-                let agg_sql = format!("SELECT SUM({}) FROM {}.{}",
+                let agg_sql = format!(
+                    "SELECT SUM({}) FROM {}.{}",
                     sql_utils::quote_ident(col),
                     sql_utils::quote_ident(schema),
                     sql_utils::quote_ident(table)
@@ -421,7 +423,10 @@ impl MetadataAdapter {
         // THE TRICK: We run a "SELECT ... WHERE 1=0" query.
         // This doesn't return any rows, but it DOES return the "Column Info"
         // which tells us exactly what Oracle internal types these columns are.
-        let quoted_names: Vec<String> = entries.iter().map(|e| sql_utils::quote_ident(&e.name)).collect();
+        let quoted_names: Vec<String> = entries
+            .iter()
+            .map(|e| sql_utils::quote_ident(&e.name))
+            .collect();
         let sql_dummy = format!(
             "SELECT {} FROM {}.{} WHERE 1=0",
             quoted_names.join(", "),

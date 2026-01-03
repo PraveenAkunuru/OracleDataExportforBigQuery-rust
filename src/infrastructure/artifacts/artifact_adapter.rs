@@ -61,6 +61,7 @@ impl ArtifactPort for ArtifactAdapter {
         output_config_dir: &str,
         enable_row_hash: bool,
         file_format: FileFormat,
+        validation_stats: Option<&crate::domain::entities::ValidationStats>,
     ) -> Result<()> {
         let config_path = Path::new(output_config_dir);
 
@@ -87,6 +88,7 @@ impl ArtifactPort for ArtifactAdapter {
             "export_timestamp": chrono::Utc::now().to_rfc3339(),
             "columns": metadata.columns,
             "pk": metadata.pk_cols,
+            "validation": validation_stats,
         });
         self.write_file(
             config_path.join("metadata.json"),

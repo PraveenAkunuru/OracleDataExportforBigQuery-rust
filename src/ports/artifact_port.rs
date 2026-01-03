@@ -31,5 +31,6 @@ pub trait ArtifactPort: Send + Sync {
         output_config_dir: &str,
         enable_row_hash: bool,
         file_format: FileFormat,
+        validation_stats: Option<&crate::domain::entities::ValidationStats>,
     ) -> Result<()>;
 }

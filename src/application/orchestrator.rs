@@ -28,11 +28,11 @@
 
 use crate::config::AppConfig as Config;
 use crate::domain::entities::{ExportTask, FileFormat, TaskResult};
-use log::debug;
 use crate::domain::errors::Result;
 use crate::ports::artifact_port::ArtifactPort;
 use crate::ports::extraction_port::ExtractionPort;
 use crate::ports::metadata_port::MetadataPort;
+use log::debug;
 use log::info;
 use rayon::prelude::*;
 use serde_json::json;
@@ -203,11 +203,48 @@ impl Orchestrator {
         let enable_row_hash = self.config.export.enable_row_hash.unwrap_or(false);
         let file_format = self.config.export.file_format.unwrap_or(FileFormat::Csv);
 
+        // --- VALIDATION (Pre-flight) ---
+        // 1. Always validate Row Count.
+        // 2. Always validate Aggregates for numeric columns (if any).
+        // 3. Validate PK Hash only if enable_row_hash is true.
+        let agg_cols: Vec<String> = metadata
+            .columns
+            .iter()
+            .filter(|c| matches!(c.bq_type.as_str(), "INT64" | "FLOAT64" | "BIGNUMERIC" | "NUMERIC"))
+            .map(|c| c.name.clone())
+            .collect();
+
+        let pk_ref = if enable_row_hash {
+            Some(metadata.pk_cols.as_slice())
+        } else {
+            None
+        };
+
+        let agg_ref = if !agg_cols.is_empty() {
+            Some(agg_cols.as_slice())
+        } else {
+            None
+        };
+
+        let validation_stats = self.metadata_port
+            .validate_table(schema, table, pk_ref, agg_ref)
+            .ok();
+
+        if let Some(ref v) = validation_stats {
+            info!("Validation Stats: Rows={}", v.row_count);
+            if let Some(aggs) = &v.aggregates {
+                info!("Validation Stats: Aggregates Checked={}", aggs.len());
+            }
+        }
+
         // --- STEP 3: ARTIFACTS ---
-        if let Err(e) =
-            self.artifact_port
-                .write_artifacts(&metadata, &config_dir, enable_row_hash, file_format)
-        {
+        if let Err(e) = self.artifact_port.write_artifacts(
+            &metadata,
+            &config_dir,
+            enable_row_hash,
+            file_format,
+            validation_stats.as_ref(),
+        ) {
             return TaskResult::failure(
                 schema.to_string(),
                 table.to_string(),
@@ -429,10 +466,11 @@ mod tests {
     impl ArtifactPort for MockArtifactPort {
         fn write_artifacts(
             &self,
-            _meta: &TableMetadata,
-            _dir: &str,
-            _hash: bool,
-            _format: FileFormat,
+            metadata: &TableMetadata,
+            _output_config_dir: &str,
+            _enable_row_hash: bool,
+            _file_format: FileFormat,
+            _validation_stats: Option<&crate::domain::entities::ValidationStats>,
         ) -> Result<()> {
             Ok(())
         }
@@ -453,7 +491,8 @@ mod tests {
                 connection_string: None,
             },
             export: crate::config::ExportConfig {
-                output_dir: out_dir.clone(), query_where: None,
+                output_dir: out_dir.clone(),
+                query_where: None,
                 schema: Some("TEST".to_string()),
                 table: None,
                 parallel: Some(2),
@@ -550,7 +589,8 @@ mod tests {
                 connection_string: None,
             },
             export: crate::config::ExportConfig {
-                output_dir: out_dir.clone(), query_where: None,
+                output_dir: out_dir.clone(),
+                query_where: None,
                 schema: Some("TEST".to_string()),
                 table: None,
                 parallel: Some(1),
@@ -602,7 +642,8 @@ mod tests {
                 connection_string: None,
             },
             export: crate::config::ExportConfig {
-                output_dir: out_dir.clone(), query_where: None,
+                output_dir: out_dir.clone(),
+                query_where: None,
                 schema: Some("TEST".to_string()),
                 table: None,
                 parallel: Some(2),
