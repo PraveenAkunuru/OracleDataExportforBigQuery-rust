@@ -35,7 +35,15 @@ fn is_excluded_type(data_str: &str) -> bool {
     let base = upper.split('(').next().unwrap_or("").trim();
     matches!(
         base,
-        "BLOB" | "CLOB" | "NCLOB" | "BFILE" | "LONG" | "LONG RAW" | "XMLTYPE" | "XML"
+        "BLOB"
+            | "CLOB"
+            | "NCLOB"
+            | "BFILE"
+            | "LONG"
+            | "LONG RAW"
+            | "XMLTYPE"
+            | "XML"
+            | "SDO_GEOMETRY"
     )
 }
 
@@ -75,7 +83,7 @@ pub fn build_column_expression(name: &str, data_type: &str) -> String {
         )
     } else if upper_type == "XMLTYPE" {
         format!(
-            "REPLACE(REPLACE(sys.XMLType.getStringVal(\"{}\"), CHR(10), ''), CHR(13), '')",
+            "REPLACE(REPLACE(sys.XMLType.getClobVal(\"{}\"), CHR(10), ''), CHR(13), '')",
             name
         )
     } else if upper_type == "JSON" {
@@ -83,8 +91,6 @@ pub fn build_column_expression(name: &str, data_type: &str) -> String {
             "REPLACE(REPLACE(JSON_SERIALIZE(\"{}\"), CHR(10), ''), CHR(13), '')",
             name
         )
-    } else if upper_type == "BOOLEAN" {
-        format!("CASE WHEN \"{}\" THEN 'true' ELSE 'false' END", name)
     } else if upper_type.contains("SDO_GEOMETRY") {
         format!("SDO_UTIL.TO_WKTGEOMETRY(\"{}\")", name)
     } else if upper_type.contains("UROWID") || upper_type.contains("ROWID") {
@@ -112,6 +118,18 @@ pub fn build_column_expression(name: &str, data_type: &str) -> String {
     }
 }
 
+/// Helper to identify if a column type requires a SQL transformation during export.
+pub fn is_transformed_type(data_type: &str) -> bool {
+    let upper = data_type.to_uppercase();
+    upper.contains("TIME ZONE")
+        || upper == "XMLTYPE"
+        || upper == "JSON"
+        || upper.contains("SDO_GEOMETRY")
+        || upper.contains("UROWID")
+        || upper.contains("ROWID")
+        || upper.contains("INTERVAL")
+}
+
 /// Builds the full SQL SELECT statement for exporting a table, including optional hash calculation and where clause.
 pub fn build_export_query(
     schema: &str,
@@ -122,12 +140,20 @@ pub fn build_export_query(
 ) -> String {
     let mut select_list: Vec<String> = columns
         .iter()
-        .map(|c| build_column_expression(&c.name, &c.raw_type))
+        .filter(|c| !c.is_virtual || c.is_transformed)
+        .map(|c| {
+            format!(
+                "{} AS \"{}\"",
+                build_column_expression(&c.name, &c.raw_type),
+                c.name
+            )
+        })
         .collect();
 
     if enable_row_hash {
         let hash_parts: Vec<String> = columns
             .iter()
+            .filter(|c| !c.is_virtual || c.is_transformed)
             .filter_map(|c| get_hash_expr_from_str(&c.name, &c.raw_type))
             .collect();
         select_list.push(format!(

@@ -1,26 +1,28 @@
-/target
-/export_data*
-/export_test*
-/config_local.yaml
-*.zip
-*.tar.gz
-/lib
-/oracle_exporter_dist
-.DS_Store
-**/*.log
 
-# Output Directories
 adaptive_output/
-golden_path_output/
-features_test_output/
-*_output/
-export_docker/
 bench_csv/
 bench_parquet/
 bench_test/
 bench_test_parquet/
 bench_types_csv/
 bench_types_parquet/
+/config_local.yaml
+.DS_Store
+/export_data*
+export_docker/
+export_full_csv/
 export_full_doc_test/
+export_full_parquet/
 export_parquet_test/
+/export_test*
+features_test_output/
+golden_path_output/
+/lib
+**/*.log
+/oracle_exporter_dist
+*_output/
+# Output Directories
 schemas.txt
+/target
+*.tar.gz
+*.zip

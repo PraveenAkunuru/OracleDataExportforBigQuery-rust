@@ -38,8 +38,14 @@ pub struct ColumnMetadata {
     pub raw_type: String,
     /// What BigQuery calls the type (e.g., "INT64").
     pub bq_type: String,
-    /// Some columns are "Virtual" (calculated values) and might need special handling.
+    /// Oracle native "Virtual Columns" (defined by an expression in the database).
+    /// These are NOT materialized on disk and only exist in the Logical View.
     pub is_virtual: bool,
+    /// The original SQL expression for a virtual column (e.g., "COL1 + COL2").
+    pub virtual_expr: Option<String>,
+    /// Columns transformed during extraction (e.g., XMLType stringified, INTERVAL formatted).
+    /// These ARE materialized in the output files and exist in the Physical Table.
+    pub is_transformed: bool,
     pub is_hidden: bool,
     pub is_identity: bool,
     pub comment: Option<String>,
@@ -57,6 +63,17 @@ pub struct TableMetadata {
     pub pk_cols: Vec<String>,
     pub partition_cols: Vec<String>,
     pub index_cols: Vec<String>,
+}
+
+impl TableMetadata {
+    /// Determines if a BigQuery view is necessary.
+    /// A view is needed only if there are native Oracle virtual columns
+    /// that are not already materialized (transformed) in the physical data.
+    pub fn needs_view(&self) -> bool {
+        self.columns
+            .iter()
+            .any(|c| c.is_virtual && !c.is_transformed)
+    }
 }
 
 /// `ExportTask` is a "To-Do" item for the database extractor.
