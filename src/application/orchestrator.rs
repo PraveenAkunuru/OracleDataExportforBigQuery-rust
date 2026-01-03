@@ -134,7 +134,7 @@ impl Orchestrator {
             // Actually, we can pass the Arc<Metadata> to the execution closure.
             table_meta_map.insert(
                 format!("{}.{}", meta_arc.schema, meta_arc.table_name),
-                meta_arc.clone()
+                meta_arc.clone(),
             );
 
             for task in tasks {
@@ -151,8 +151,9 @@ impl Orchestrator {
 
         // --- STEP 6: AGGREGATION ---
         // Group results by table and aggregate.
-        let mut results_by_table: std::collections::HashMap<String, Vec<TaskResult>> = std::collections::HashMap::new();
-        
+        let mut results_by_table: std::collections::HashMap<String, Vec<TaskResult>> =
+            std::collections::HashMap::new();
+
         // Initialize with empty lists for all successful plans ensuring every table gets a result
         for key in table_meta_map.keys() {
             results_by_table.entry(key.clone()).or_default();
@@ -173,7 +174,11 @@ impl Orchestrator {
         }
 
         // Sort by duration desc for visibility
-        final_results.sort_by(|a, b| b.duration.partial_cmp(&a.duration).unwrap_or(std::cmp::Ordering::Equal));
+        final_results.sort_by(|a, b| {
+            b.duration
+                .partial_cmp(&a.duration)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // --- STEP 7: REPORTING ---
         self.generate_report(&final_results, start_time.elapsed().as_secs_f64())?;
@@ -216,7 +221,12 @@ impl Orchestrator {
     }
 
     /// Prepares a table for export: fetches metadata, writes artifacts, and generates chunks.
-    fn prepare_table(&self, schema: &str, table: &str) -> std::result::Result<(TableMetadata, Vec<ExportTask>), TaskResult> {
+    #[allow(clippy::result_large_err)]
+    fn prepare_table(
+        &self,
+        schema: &str,
+        table: &str,
+    ) -> std::result::Result<(TableMetadata, Vec<ExportTask>), TaskResult> {
         info!("Planning {}.{}", schema, table);
 
         // 1. Metadata
@@ -235,8 +245,10 @@ impl Orchestrator {
         // 2. Setup Directories
         let config_dir = self.config.get_table_config_dir(schema, table);
         let data_dir = self.config.get_table_data_dir(schema, table);
-        
-        if let Err(e) = std::fs::create_dir_all(&config_dir).and_then(|_| std::fs::create_dir_all(&data_dir)) {
+
+        if let Err(e) =
+            std::fs::create_dir_all(&config_dir).and_then(|_| std::fs::create_dir_all(&data_dir))
+        {
             return Err(TaskResult::failure(
                 schema.to_string(),
                 table.to_string(),
@@ -255,7 +267,12 @@ impl Orchestrator {
         let agg_cols: Vec<String> = metadata
             .columns
             .iter()
-            .filter(|c| matches!(c.bq_type.as_str(), "INT64" | "FLOAT64" | "BIGNUMERIC" | "NUMERIC"))
+            .filter(|c| {
+                matches!(
+                    c.bq_type.as_str(),
+                    "INT64" | "FLOAT64" | "BIGNUMERIC" | "NUMERIC"
+                )
+            })
             .map(|c| c.name.clone())
             .collect();
 
@@ -271,7 +288,8 @@ impl Orchestrator {
             None
         };
 
-        let validation_stats = self.metadata_port
+        let validation_stats = self
+            .metadata_port
             .validate_table(schema, table, pk_ref, agg_ref)
             .ok();
 
@@ -314,12 +332,20 @@ impl Orchestrator {
         };
 
         let tasks: Vec<ExportTask> = if chunks.is_empty() {
-             vec![ExportTask {
+            vec![ExportTask {
                 schema: schema.to_string(),
                 table: table.to_string(),
                 chunk_id: None,
-                query_where: self.config.export.query_where.clone().or_else(|| Some("1=1".to_string())),
-                output_file: data_dir.join(format!("data.{}", extension)).to_string_lossy().to_string(),
+                query_where: self
+                    .config
+                    .export
+                    .query_where
+                    .clone()
+                    .or_else(|| Some("1=1".to_string())),
+                output_file: data_dir
+                    .join(format!("data.{}", extension))
+                    .to_string_lossy()
+                    .to_string(),
                 enable_row_hash,
                 use_client_hash: self.config.export.use_client_hash.unwrap_or(false),
                 file_format,
@@ -335,7 +361,10 @@ impl Orchestrator {
                     table: table.to_string(),
                     chunk_id: Some(i as u32),
                     query_where: Some(format!("{} AND 1=1", where_clause)),
-                    output_file: data_dir.join(format!("data_chunk_{:04}.{}", i, extension)).to_string_lossy().to_string(),
+                    output_file: data_dir
+                        .join(format!("data_chunk_{:04}.{}", i, extension))
+                        .to_string_lossy()
+                        .to_string(),
                     enable_row_hash,
                     use_client_hash: self.config.export.use_client_hash.unwrap_or(false),
                     file_format,
@@ -354,12 +383,7 @@ impl Orchestrator {
         self.extraction_port
             .export_task(task.clone(), metadata)
             .unwrap_or_else(|e| {
-                TaskResult::failure(
-                    task.schema,
-                    task.table,
-                    task.chunk_id,
-                    format!("{:?}", e),
-                )
+                TaskResult::failure(task.schema, task.table, task.chunk_id, format!("{:?}", e))
             })
     }
 

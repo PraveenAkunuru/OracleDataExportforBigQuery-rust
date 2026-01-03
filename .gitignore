@@ -26,3 +26,8 @@ schemas.txt
 /target
 *.tar.gz
 *.zip
+
+# Test Output Directories
+export_docker_hash/
+export_docker_parquet_hash/
+export_docker_parquet/

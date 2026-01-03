@@ -7,11 +7,7 @@ database:
 
 export:
   schema: "TESTUSER"
-  output_dir: "./export_full_csv"
-  parallel: 10
+  output_dir: "./export_docker_parquet_hash"
+  parallel: 20
   enable_row_hash: true
-  file_format: "CSV"
-
-bigquery:
-  project: "pakunuru-1119-20250930202256"
-  dataset: "TESTUSER_FULL_CSV"
+  file_format: "PARQUET"

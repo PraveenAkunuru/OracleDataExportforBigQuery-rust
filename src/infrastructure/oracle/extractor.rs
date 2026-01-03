@@ -29,13 +29,13 @@ use base64::{engine::general_purpose, Engine as _};
 use csv::{QuoteStyle, WriterBuilder};
 use flate2::write::GzEncoder;
 use flate2::Compression as GzipCompression;
+use log::debug;
 use oracle::{sql_type::OracleType, sql_type::Timestamp, ColumnInfo, Row};
 use r2d2::Pool;
 use std::fs::File;
 use std::io::BufWriter;
 use std::sync::Arc;
 use std::time::Instant;
-use log::debug;
 
 use arrow_array::builder::*;
 use arrow_array::ArrayRef;
@@ -194,9 +194,7 @@ impl RowWriter for CsvRowWriter {
 
         // Flush the underlying BufWriter.
         use std::io::Write;
-        buf_writer
-            .flush()
-            .map_err(ExportError::IoError)?;
+        buf_writer.flush().map_err(ExportError::IoError)?;
 
         Ok((self.count, self.bytes))
     }
@@ -535,10 +533,11 @@ fn create_push_builder(
         Decimal128(p, s) => {
             debug!("Creating Decimal128Builder(p={}, s={})", p, s);
             Box::new(Decimal128Push(
-            Decimal128Builder::with_capacity(cap)
-                .with_precision_and_scale(*p, *s)
-                .expect("Failed to create Decimal128Builder"),
-        ))},
+                Decimal128Builder::with_capacity(cap)
+                    .with_precision_and_scale(*p, *s)
+                    .expect("Failed to create Decimal128Builder"),
+            ))
+        }
         _ => Box::new(StringPush(
             StringBuilder::with_capacity(cap, cap * 32),
             ot.clone(),

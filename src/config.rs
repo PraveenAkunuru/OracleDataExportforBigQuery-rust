@@ -385,7 +385,9 @@ impl AppConfig {
 
     /// Returns the base output directory for a specific table.
     pub fn get_table_output_dir(&self, schema: &str, table: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(&self.export.output_dir).join(schema).join(table)
+        std::path::PathBuf::from(&self.export.output_dir)
+            .join(schema)
+            .join(table)
     }
 
     /// Returns the configuration directory for a specific table.

@@ -72,14 +72,16 @@ fn main() {
     let runtime = crate::application::runtime::RuntimeContext::init(&config).unwrap_or_else(|e| {
         let err_msg = e.to_string();
         error!("Runtime initialization failed: {}", err_msg);
-        
+
         // Resilience: Suggest wrapper script for common library path issues
         if err_msg.contains("DPI-1047") {
             eprintln!("\n\x1b[31mError: Oracle Client libraries not found (DPI-1047).\x1b[0m");
             eprintln!("To fix this, try running with the helper script:");
-            eprintln!("\n    \x1b[32m./scripts/run_with_env.sh cargo run --release -- ...\x1b[0m\n");
+            eprintln!(
+                "\n    \x1b[32m./scripts/run_with_env.sh cargo run --release -- ...\x1b[0m\n"
+            );
         }
-        
+
         std::process::exit(1);
     });
 

@@ -169,7 +169,11 @@ fn map_number_type(prec: &u8, scale: &i8) -> MappingEntry {
         } else {
             format!("BIGNUMERIC({}, {})", p, s)
         };
-        let arrow_t = if (1..=38).contains(&p) && (0..=38).contains(&s) {
+        let arrow_t = if p == 0 {
+             // 0 precision (e.g. simple NUMBER) is treated as undefined precision in some contexts.
+             // Arrow doesn't allow Decimal128(0, s). Fallback to String.
+             DataType::Utf8
+        } else if (1..=38).contains(&p) && (0..=38).contains(&s) {
             DataType::Decimal128(p, s)
         } else {
             // Fallback to String for extreme cases.
