@@ -10,6 +10,7 @@ use crate::domain::entities::{ColumnMetadata, TableMetadata};
 use crate::domain::errors::{ExportError, Result};
 use crate::domain::mapping;
 use crate::infrastructure::oracle::connection_manager::OracleConnectionManager;
+use crate::infrastructure::oracle::sql_utils;
 use crate::ports::metadata_port::MetadataPort;
 use log::{debug, info, warn};
 use oracle::Connection;
@@ -418,16 +419,27 @@ impl MetadataAdapter {
         }
 
         let mut final_cols = Vec::new();
+        let virtual_map = get_virtual_columns_map(conn, schema, table);
+
         for e in entries {
             let otype = e
                 .oracle_type
                 .unwrap_or(oracle::sql_type::OracleType::Varchar2(4000));
+
+            let v_expr = if e.is_virtual {
+                virtual_map.get(&e.name.to_uppercase()).cloned()
+            } else {
+                None
+            };
+
             final_cols.push(ColumnMetadata {
                 name: e.name.clone(),
                 raw_type: e.data_type.clone(),
                 // Use our domain mapper to bridge Oracle -> BigQuery!
                 bq_type: mapping::map_oracle_to_bq(&otype, Some(&e.data_type)),
                 is_virtual: e.is_virtual,
+                virtual_expr: v_expr,
+                is_transformed: sql_utils::is_transformed_type(&e.data_type),
                 is_hidden: e.is_hidden,
                 is_identity: e.is_identity,
                 comment: e.comment,

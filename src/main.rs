@@ -99,11 +99,15 @@ fn main() {
     match orchestrator.run() {
         Ok(results) => {
             let success_count = results.iter().filter(|r| r.status == "SUCCESS").count();
+            let total_count = results.len();
             info!(
                 "Export finished. {}/{} tables successful.",
-                success_count,
-                results.len()
+                success_count, total_count
             );
+            if success_count < total_count {
+                error!("Some tables failed to export.");
+                process::exit(1);
+            }
         }
         Err(e) => {
             error!("Orchestrator failed: {:?}", e);

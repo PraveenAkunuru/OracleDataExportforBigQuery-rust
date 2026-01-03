@@ -351,6 +351,8 @@ mod tests {
                     raw_type: "VARCHAR2".to_string(),
                     bq_type: "STRING".to_string(),
                     is_virtual: false,
+                    virtual_expr: None,
+                    is_transformed: false,
                     is_hidden: false,
                     is_identity: false,
                     comment: None,

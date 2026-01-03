@@ -12,7 +12,7 @@ A high-performance, single-binary utility for migrating large-scale Oracle datab
 *   **🏊 Connection Pooling**: Integrated `r2d2` pooling for stable, high-throughput parallel sessions.
 *   **🧩 Intelligent Parallel Chunking**: Automatically splits large tables (>1GB) into parallel chunks using `ROWID` ranges.
 *   **🏗️ Certified Hexagonal Architecture**: Clean separation of concerns ensuring codebase maintainability and testability.
-*   **💎 Virtual Column Support**: Automatically re-implements Oracle virtual columns as **BigQuery Views**.
+*   **💎 Virtual Column Support**: Hybrid approach that materializes complex types (XML, Spatial, Interval) in **Physical Tables** while recreating native Oracle logic in **Logical Views**.
 *   **🛡️ Resilient Data Discovery**: Multi-layered fallback for table size discovery and `DATA_DEFAULT` truncation protection.
 *   **📊 Comprehensive Reporting**: Generates detailed JSON reports with MB/s, row counts, and data point validation.
 

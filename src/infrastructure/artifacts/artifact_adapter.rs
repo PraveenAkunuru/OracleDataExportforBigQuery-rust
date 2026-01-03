@@ -100,29 +100,21 @@ impl ArtifactPort for ArtifactAdapter {
     }
 }
 
-const DDL_TEMPLATE: &str = r#"-- 1. Physical Table: This holds the raw data.
-CREATE OR REPLACE TABLE `{project_id}.{dataset_id}.{physical_name}` (
-{column_definitions}{hash_column}{primary_key}
-)
-{partitioning}
-{clustering};
-
--- 2. Logical View: This is what analysts should query.
-CREATE OR REPLACE VIEW `{project_id}.{dataset_id}.{table_name}` AS SELECT
-{view_columns}{view_hash}
-FROM `{project_id}.{dataset_id}.{physical_name}`;
-"#;
-
 impl ArtifactAdapter {
     /// Generates optimized BigQuery DDL.
     fn generate_bq_ddl(&self, metadata: &TableMetadata, enable_row_hash: bool) -> String {
-        let physical_name = format!("{}_PHYSICAL", metadata.table_name);
+        let needs_view = metadata.needs_view();
+        let physical_name = if needs_view {
+            format!("{}_PHYSICAL", metadata.table_name)
+        } else {
+            metadata.table_name.clone()
+        };
 
-        // Definitions for columns that actually exist on disk (no virtual columns).
+        // 1. Physical Table Definitions (Data on disk)
         let column_definitions = metadata
             .columns
             .iter()
-            .filter(|c| !c.is_virtual)
+            .filter(|c| !c.is_virtual || c.is_transformed)
             .map(|c| {
                 let desc = c
                     .comment
@@ -148,7 +140,6 @@ impl ArtifactAdapter {
             "".to_string()
         };
 
-        // Handle Partitioning (BigQuery's way of splitting data by day/month).
         let partitioning = metadata
             .columns
             .iter()
@@ -156,10 +147,17 @@ impl ArtifactAdapter {
                 metadata.partition_cols.contains(&c.name)
                     && (c.bq_type.contains("DATE") || c.bq_type.contains("TIMESTAMP"))
             })
-            .map(|c| format!("PARTITION BY {}", c.name))
+            .map(|c| {
+                if c.bq_type == "DATETIME" {
+                    format!("PARTITION BY DATETIME_TRUNC({}, DAY)", c.name)
+                } else if c.bq_type == "TIMESTAMP" {
+                    format!("PARTITION BY TIMESTAMP_TRUNC({}, DAY)", c.name)
+                } else {
+                    format!("PARTITION BY {}", c.name)
+                }
+            })
             .unwrap_or_default();
 
-        // Handle Clustering (BigQuery's way of sorting data for faster searches).
         let mut cluster_cols = metadata.pk_cols.clone();
         for idx in &metadata.index_cols {
             if !cluster_cols.contains(idx) {
@@ -175,33 +173,71 @@ impl ArtifactAdapter {
             "".to_string()
         };
 
-        // The View includes all columns + any virtual column logic.
+        let table_ddl = format!(
+            "CREATE OR REPLACE TABLE `{}.{}.{}` (\n{}{}{}\n)\n{}\n{};",
+            self.project_id,
+            self.dataset_id,
+            physical_name,
+            column_definitions,
+            hash_column,
+            primary_key,
+            partitioning,
+            clustering
+        );
+
+        if !needs_view {
+            return format!("-- Physical Table: Holds the raw data.\n{}", table_ddl);
+        }
+
+        // 2. Logical View (Only if virtual columns exist)
         let view_columns = metadata
             .columns
             .iter()
             .map(|c| {
-                if c.is_virtual {
-                    format!("  CAST(`{}` AS STRING) AS {}", c.name, c.name)
+                if c.is_virtual && !c.is_transformed {
+                    let mut expr = c
+                        .virtual_expr
+                        .as_deref()
+                        .unwrap_or("NULL")
+                        .replace('"', "`");
+
+                    // Basic translation for common Oracle functions
+                    if expr.contains("TO_CHAR(") {
+                        expr = expr.replace("TO_CHAR(", "CAST(");
+                        // Find the first closing paren after the CAST we just added
+                        if let Some(cast_start) = expr.find("CAST(") {
+                            if let Some(paren_offset) = expr[cast_start..].find(')') {
+                                expr.insert_str(cast_start + paren_offset, " AS STRING");
+                            }
+                        }
+                    }
+
+                    format!("  {} AS {}", expr, c.name)
                 } else {
+                    // Regular or transformed column already exists in physical table.
                     format!("  {}", c.name)
                 }
             })
             .collect::<Vec<_>>()
             .join(",\n");
-        let view_hash = if enable_row_hash { ",\n  ROW_HASH" } else { "" };
 
-        DDL_TEMPLATE
-            .replace("{project_id}", &self.project_id)
-            .replace("{dataset_id}", &self.dataset_id)
-            .replace("{physical_name}", &physical_name)
-            .replace("{table_name}", &metadata.table_name)
-            .replace("{column_definitions}", &column_definitions)
-            .replace("{hash_column}", hash_column)
-            .replace("{primary_key}", &primary_key)
-            .replace("{partitioning}", &partitioning)
-            .replace("{clustering}", &clustering)
-            .replace("{view_columns}", &view_columns)
-            .replace("{view_hash}", view_hash)
+        let view_hash = if enable_row_hash { ",\n  ROW_HASH" } else { "" };
+        let view_ddl = format!(
+            "CREATE OR REPLACE VIEW `{}.{}.{}` AS SELECT\n{}{}\nFROM `{}.{}.{}`;",
+            self.project_id,
+            self.dataset_id,
+            metadata.table_name,
+            view_columns,
+            view_hash,
+            self.project_id,
+            self.dataset_id,
+            physical_name
+        );
+
+        format!(
+            "-- 1. Physical Table\n{}\n\n-- 2. Logical View\n{}",
+            table_ddl, view_ddl
+        )
     }
 
     /// Generates BigQuery Schema JSON.
@@ -211,7 +247,7 @@ impl ArtifactAdapter {
         enable_row_hash: bool,
     ) -> serde_json::Value {
         let mut fields: Vec<_> = metadata.columns.iter()
-            .filter(|c| !c.is_virtual)
+            .filter(|c| !c.is_virtual || c.is_transformed)
             .map(|c| json!({"name": c.name, "type": c.bq_type, "mode": "NULLABLE", "description": c.comment}))
             .collect();
         if enable_row_hash {
@@ -230,9 +266,14 @@ impl ArtifactAdapter {
             ),
             FileFormat::Parquet => ("PARQUET", "", "*.parquet"),
         };
+        let table_name = if metadata.needs_view() {
+            format!("{}_PHYSICAL", metadata.table_name)
+        } else {
+            metadata.table_name.clone()
+        };
         format!(
-            "#!/bin/bash\n# BigQuery Load Command ({})\n# Run this from inside the config/ directory.\nset -e\nbq load --source_format={} {} --replace --schema=schema.json {}:{}.{}_PHYSICAL \"../data/{}\"\n",
-            fmt, fmt, args, self.project_id, self.dataset_id, metadata.table_name, ext
+            "#!/bin/bash\n# BigQuery Load Command ({})\n# Run this from inside the config/ directory.\nset -e\nbq load --source_format={} {} --replace --schema=schema.json {}:{}.{} \"../data/{}\"\n",
+            fmt, fmt, args, self.project_id, self.dataset_id, table_name, ext
         )
     }
 }
@@ -254,6 +295,8 @@ mod tests {
                     raw_type: "VARCHAR2".into(),
                     bq_type: "STRING".into(),
                     is_virtual: false,
+                    virtual_expr: None,
+                    is_transformed: false,
                     is_hidden: false,
                     is_identity: false,
                     comment: Some("C1 comment".into()),
@@ -263,6 +306,19 @@ mod tests {
                     raw_type: "NUMBER".into(),
                     bq_type: "INTEGER".into(),
                     is_virtual: true,
+                    virtual_expr: None,
+                    is_transformed: false,
+                    is_hidden: false,
+                    is_identity: false,
+                    comment: None,
+                },
+                ColumnMetadata {
+                    name: "T1".into(),
+                    raw_type: "XMLTYPE".into(),
+                    bq_type: "STRING".into(),
+                    is_virtual: true,
+                    virtual_expr: None,
+                    is_transformed: true,
                     is_hidden: false,
                     is_identity: false,
                     comment: None,
@@ -277,10 +333,11 @@ mod tests {
         let schema = adapter.generate_schema_json(&meta, true);
         let fields = schema.as_array().unwrap();
 
-        // Should have C1 and ROW_HASH, but NOT V1
-        assert_eq!(fields.len(), 2);
+        // Should have C1, T1, and ROW_HASH (V1 is native virtual, so excluded. T1 is virtual+transformed, so included)
+        assert_eq!(fields.len(), 3);
         assert_eq!(fields[0]["name"], "C1");
-        assert_eq!(fields[1]["name"], "ROW_HASH");
+        assert_eq!(fields[1]["name"], "T1");
+        assert_eq!(fields[2]["name"], "ROW_HASH");
     }
 
     #[test]
@@ -295,15 +352,30 @@ mod tests {
                     raw_type: "NUMBER".into(),
                     bq_type: "INT64".into(),
                     is_virtual: false,
+                    virtual_expr: None,
+                    is_transformed: false,
                     is_hidden: false,
                     is_identity: false,
                     comment: None,
                 },
                 ColumnMetadata {
-                    name: "COMPUTED".into(),
+                    name: "NATIVE_V".into(),
                     raw_type: "VARCHAR2".into(),
                     bq_type: "STRING".into(),
                     is_virtual: true,
+                    virtual_expr: Some("COL_A + COL_B".into()),
+                    is_transformed: false,
+                    is_hidden: false,
+                    is_identity: false,
+                    comment: None,
+                },
+                ColumnMetadata {
+                    name: "TRANSFORMED_V".into(),
+                    raw_type: "XMLTYPE".into(),
+                    bq_type: "STRING".into(),
+                    is_virtual: true,
+                    virtual_expr: None,
+                    is_transformed: true,
                     is_hidden: false,
                     is_identity: false,
                     comment: None,
@@ -319,9 +391,39 @@ mod tests {
 
         assert!(ddl.contains("CREATE OR REPLACE TABLE `my-project.my-dataset.MY_TABLE_PHYSICAL`"));
         assert!(ddl.contains("ID INT64"));
-        assert!(!ddl.contains("COMPUTED STRING")); // Virtual should be in view, not table
+        assert!(ddl.contains("TRANSFORMED_V STRING")); // Included because it is transformed
+        assert!(!ddl.contains("NATIVE_V STRING")); // Excluded because it is ONLY virtual
         assert!(ddl.contains("CREATE OR REPLACE VIEW `my-project.my-dataset.MY_TABLE`"));
-        assert!(ddl.contains("CAST(`COMPUTED` AS STRING) AS COMPUTED"));
+        assert!(ddl.contains("COL_A + COL_B AS NATIVE_V"));
+    }
+
+    #[test]
+    fn test_generate_bq_ddl_no_view() {
+        let adapter = ArtifactAdapter::new("my-project".into(), "my-dataset".into());
+        let meta = TableMetadata {
+            schema: "TEST".into(),
+            table_name: "SIMPLE_TABLE".into(),
+            columns: vec![ColumnMetadata {
+                name: "ID".into(),
+                raw_type: "NUMBER".into(),
+                bq_type: "INT64".into(),
+                is_virtual: false,
+                virtual_expr: None,
+                is_transformed: false,
+                is_hidden: false,
+                is_identity: false,
+                comment: None,
+            }],
+            size_gb: 0.1,
+            pk_cols: vec!["ID".into()],
+            partition_cols: vec![],
+            index_cols: vec![],
+        };
+
+        let ddl = adapter.generate_bq_ddl(&meta, false);
+
+        assert!(ddl.contains("CREATE OR REPLACE TABLE `my-project.my-dataset.SIMPLE_TABLE`"));
+        assert!(!ddl.contains("VIEW"));
     }
 
     #[test]
