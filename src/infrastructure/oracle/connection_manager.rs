@@ -1,5 +1,5 @@
-use r2d2::ManageConnection;
 use oracle::{Connection, Error};
+use r2d2::ManageConnection;
 
 /// Custom R2D2 connection manager for Oracle to ensure consistent library versions.
 #[derive(Debug)]

@@ -1,3 +1,3 @@
-pub mod mapping;
-pub mod errors;
 pub mod entities;
+pub mod errors;
+pub mod mapping;

@@ -1,115 +1,154 @@
 # 🏗️ Architecture & Technical Reference
 
-This document serves as the master reference for the **Oracle Data Exporter for BigQuery**. It covers the architectural patterns, data strategies, and operational constraints of the system.
+This document serves as the master reference for the **Oracle Data Exporter for BigQuery**. It covers the architectural patterns, data strategies, and operational constraints of the system, designed to provide both high-level context and educational depth for new developers.
 
 ---
 
 ## 🏛️ Hexagonal Architecture (Ports and Adapters)
 
-The application is structured to strictly decouple business orchestration from external I/O. This ensures that the core logic is testable without a database and that adapters (e.g., swapping Local Storage for GCS) can be replaced with minimal impact.
+The application follows **Hexagonal Architecture**, which strictly decouples business logic from external I/O. This ensures the core is testable and adapters (Oracle, Filesystem) can be replaced with minimal impact.
+
+```mermaid
+graph TD
+    subgraph Application ["Application Layer (The Brain)"]
+        Orchestrator[Orchestrator]
+    end
+    
+    subgraph Domain ["Domain Layer (Business Logic)"]
+        Entities[Entities]
+        Mapping[Type Mapping]
+    end
+    
+    subgraph Ports ["Ports (Contracts/Traits)"]
+        MetadataPort[[MetadataPort]]
+        ExtractionPort[[ExtractionPort]]
+        ArtifactPort[[ArtifactPort]]
+    end
+    
+    subgraph Infrastructure ["Infrastructure (Implementation/Adapters)"]
+        MetadataAdapter[Oracle Metadata Adapter]
+        Extractor[Oracle Extractor]
+        ArtifactAdapter[BQ Artifact Adapter]
+    end
+    
+    Orchestrator -- uses --> MetadataPort
+    Orchestrator -- uses --> ExtractionPort
+    Orchestrator -- uses --> ArtifactPort
+    
+    MetadataAdapter -- implements --> MetadataPort
+    Extractor -- implements --> ExtractionPort
+    ArtifactAdapter -- implements --> ArtifactPort
+    
+    Orchestrator -- relies on --> Entities
+    Orchestrator -- relies on --> Mapping
+```
 
 ### 1. Domain Layer (`src/domain/`)
-*   **Role**: Internal state and pure logic.
+*   **Role**: Internal state and pure logic. It represents the "Nouns" and "Rules" of the application.
 *   **Key Files**:
-    *   [`entities.rs`](src/domain/entities.rs): Definitions for `TableMetadata`, `ExportTask`, and `TaskResult`.
-    *   [`mapping.rs`](src/domain/mapping.rs): Translation rules for converting Oracle types to Arrow/BigQuery types.
+    *   [`entities.rs`](src/domain/entities.rs): **The Nouns**. Definitions for `TableMetadata`, `ExportTask`, and `TaskResult`.
+    *   [`mapping.rs`](src/domain/mapping.rs): **The Bridge**. Logic for converting Oracle types to Arrow/BigQuery types.
     *   [`errors.rs`](src/domain/errors.rs): Centralized error handling using `thiserror`.
 
 ### 2. Application Layer (`src/application/`)
 *   **Role**: Orchestration and coordination.
 *   **Key Files**:
-    *   [`orchestrator.rs`](src/application/orchestrator.rs): The "Brain". Discovers tables, manages Rayon parallel pools, and coordinates tasks.
+    *   [`orchestrator.rs`](src/application/orchestrator.rs): **The Conductor**. Discovers tables, manages parallelism, and coordinates tasks using Ports.
 
 ### 3. Ports (`src/ports/`)
-*   **Role**: Dependency inversion contracts (Traits).
-*   **Interfaces**:
-    *   [`metadata_port.rs`](src/ports/metadata_port.rs): Contract for metadata discovery and schema reading (`MetadataPort`).
-    *   [`extraction_port.rs`](src/ports/extraction_port.rs): Contract for row-level data extraction (`ExtractionPort`).
-    *   [`artifact_port.rs`](src/ports/artifact_port.rs): Contract for writing sidecar artifacts (`ArtifactPort`).
+*   **Role**: **Contracts**. They define *what* needs to be done using Rust Traits.
+*   [`metadata_port.rs`](src/ports/metadata_port.rs): Contract for schema discovery.
+*   [`extraction_port.rs`](src/ports/extraction_port.rs): Contract for data movement.
+*   [`artifact_port.rs`](src/ports/artifact_port.rs): Contract for generating sidecar files.
 
 ### 4. Infrastructure Layer (`src/infrastructure/`)
-*   **Role**: Implementation of Ports using specific technologies.
-*   **Adapters**:
-    *   [`metadata.rs`](src/infrastructure/oracle/metadata.rs): Queries Oracle dictionary views (`ALL_TAB_COLS`, etc.) with multi-layered fallback for size discovery.
-    *   [`extractor.rs`](src/infrastructure/oracle/extractor.rs): Handles high-performance streaming to CSV or native Parquet.
-    *   [`artifact_adapter.rs`](src/infrastructure/artifacts/artifact_adapter.rs): Generates DDL, Schema JSON, and Load scripts on the local filesystem.
-    *   [`connection_manager.rs`](src/infrastructure/oracle/connection_manager.rs): Implements `r2d2` connection pooling for stable multi-threaded access.
+*   **Role**: **Adapters**. Technical implementations of the Ports.
+*   [`metadata.rs`](src/infrastructure/oracle/metadata.rs): Talks to Oracle's system catalog.
+*   [`extractor.rs`](src/infrastructure/oracle/extractor.rs): Streams data directly to disk.
+*   [`artifact_adapter.rs`](src/infrastructure/artifacts/artifact_adapter.rs): Generates BQ load scripts.
 
 ---
 
-## ⚡ Performance Strategies
+## ⚡ Performance & Data Flow
 
-### 1. Connection Pooling (R2D2)
-To maximize throughput without overwhelming the Oracle listener, the exporter uses an internal connection pool implemented in [`connection_manager.rs`](src/infrastructure/oracle/connection_manager.rs):
--   **Stable Parallelism**: Threads pull connections from the pool as needed.
--   **Resource Safety**: Prevents "too many sessions" errors during large-scale parallel exports.
+### 1. Streaming Data Flow
+The exporter uses a "Pull-based" streaming model to maintain a constant memory footprint, regardless of table size.
 
-### 2. Parallel Chunking (DBMS_PARALLEL_EXECUTE)
-For large tables, the exporter triggers a chunked export strategy coordinated by the [`orchestrator.rs`](src/application/orchestrator.rs):
--   Uses `DBMS_PARALLEL_EXECUTE.CREATE_CHUNKS_BY_ROWID` via [`metadata.rs`](src/infrastructure/oracle/metadata.rs).
--   **Resilient Cleanup**: Chunks are cleaned up immediately after metadata fetch via an internal closure-wrap to ensure no stale tasks remain in Oracle.
--   **Size Fallback**: If `ALL_SEGMENTS` is inaccessible, it falls back to `USER_SEGMENTS` and then to table statistics.
+```mermaid
+sequenceDiagram
+    participant Oracle
+    participant r2d2 as Connection Pool
+    participant Extractor as Oracle Extractor
+    participant Arrow as Arrow Batch Builder
+    participant Disk as Parquet/CSV File
+    
+    Extractor->>r2d2: Get Connection
+    Loop Every 5000 Rows (Batch)
+        Extractor->>Oracle: Fetch Batch (OCI)
+        Oracle-->>Extractor: Row Data
+        Extractor->>Arrow: Append to Columnar Arrays
+        Note over Arrow: Zero-copy conversion
+        Arrow->>Disk: Flush Batch to Disk
+    End
+    Extractor->>r2d2: Release Connection
+```
 
-### 3. Zero-Copy Native Parquet
-Implemented in [`extractor.rs`](src/infrastructure/oracle/extractor.rs):
--   **Arrow Batching**: Oracle rows are streamed directly into Arrow arrays.
--   **No Intermediate Text**: Data maps directly from Oracle OCI buffers to binary Parquet blocks, maximizing MB/s.
--   **Improved Modularity**: Core SQL expression generation is decoupled into a `build_column_expression` helper within [`extractor.rs`](src/infrastructure/oracle/extractor.rs) for easier maintenance.
+### 2. Parallel Chunking (ROWID)
+For very large tables, we don't just run one query. We use Oracle's `DBMS_PARALLEL_EXECUTE` to split the table into physical "chunks" based on block ranges.
+
+```mermaid
+graph LR
+    Table[(Oracle Table)] --> Task[Parallel Task]
+    Task --> C1[ROWID Range 1]
+    Task --> C2[ROWID Range 2]
+    Task --> C3[ROWID Range 3]
+    
+    subgraph Rayon ["Rayon Thread Pool"]
+        T1[Thread 1]
+        T2[Thread 2]
+        T3[Thread 3]
+    end
+    
+    C1 --> T1
+    C2 --> T2
+    C3 --> T3
+    
+    T1 --> F1[file_part_1.parquet]
+    T2 --> F2[file_part_2.parquet]
+    T3 --> F3[file_part_3.parquet]
+```
 
 ---
 
-## 📈 Benchmarks (Oracle 23c Docker Environment)
+## 🎓 Rust Patterns for Juniors
 
-The following metrics represent performance verified in the integration test environment (Table: `ALL_TYPES_TEST2`, ~8M rows). 
+Throughout the codebase, we utilize specific Rust features to ensure performance and safety:
 
-> [!NOTE]
-> **Throughput Metrics**: MB/s is calculated based on the **compressed output volume** written to disk. Because Gzip (CSV) is consistently more "dense" than Snappy (Parquet) for Oracle text data, it processes significantly more rows to generate the same output volume.
+- **`Arc<T>` (Atomic Reference Counting)**: Used to share the Database Connection Pool or specific Adapters across many worker threads safely.
+- **`Box<dyn Trait>` (Dynamic Dispatch)**: Used to swap between CSV and Parquet writers at runtime without the Orchestrator needing to know the details.
+- **`Send + Sync`**: These are "Marker Traits". We add them to our Ports to guarantee to the compiler that our objects are safe to be used in parallel across threads.
+- **Zero-Copy Macros**: We use macros like `impl_push!` in the extractor to rapidly move data from Oracle's memory buffers into Arrow's memory buffers without extra allocations.
 
-| Format | Throughput (MB/s) | Throughput (Rows/s) | CPU Usage |
+---
+
+## 📈 Benchmarks
+
+| Format | Throughput (MB/s) | Throughput (Rows/s) | Notes |
 | :--- | :--- | :--- | :--- |
-| **CSV (Gzip)** | **18.8 MB/s** | **63,000** | Moderate (Gzip limit) |
-| **Parquet** | **17.0 MB/s** | **26,000** | High (Arrow Serialization) |
+| **CSV (Gzip)** | **18.8 MB/s** | **63,000** | Faster rows/s due to simpler formatting |
+| **Parquet** | **17.0 MB/s** | **26,000** | Slower rows/s but results in binary files |
 
 ---
 
-## 🛡️ Resiliency Features
+## 🔍 Specialized Logic
 
-### 1. DATA_DEFAULT Protection
-Oracle virtual columns are backed by `LONG` columns in the dictionary. The exporter (via [`metadata.rs`](src/infrastructure/oracle/metadata.rs)) monitors the length of these expressions and warns if they approach or exceed the 32KB truncation limit.
-
-### 2. Contextual Error Reporting
-Errors defined in [`errors.rs`](src/domain/errors.rs) are enriched with `table_name` and `chunk_id` context as they bubble up through the hexagonal layers.
-
----
-
-## 🔍 Specialized Data Handling
-
-### Virtual Columns
-The exporter re-implements Oracle virtual columns as **BigQuery Views**, ensuring logic parity. Mapping rules are defined in [`mapping.rs`](src/domain/mapping.rs).
-
-### Spatial Data (`SDO_GEOMETRY`)
-### Interval-to-String Transformation
-Oracle `INTERVAL` types are transformed into a canonical string format that BigQuery's `INTERVAL` type can reliably parse. This logic handles signs, component isolation, and ensures compatibility with BigQuery's strict interval literal requirements.
-
-#### Year-Month Transformation
-```sql
-CASE WHEN "{col}" IS NULL THEN NULL ELSE 
-  CASE WHEN EXTRACT(YEAR FROM "{col}") < 0 OR EXTRACT(MONTH FROM "{col}") < 0 THEN '-' ELSE '' END || 
-  ABS(EXTRACT(YEAR FROM "{col}")) || '-' || ABS(EXTRACT(MONTH FROM "{col}")) || ' 0 0:0:0' END
-```
-
-#### Day-Second Transformation
-```sql
-CASE WHEN "{col}" IS NULL THEN NULL ELSE 
-  '0-0 ' || CASE WHEN EXTRACT(DAY FROM "{col}") < 0 OR EXTRACT(HOUR FROM "{col}") < 0 OR 
-  EXTRACT(MINUTE FROM "{col}") < 0 OR EXTRACT(SECOND FROM "{col}") < 0 THEN '-' ELSE '' END || 
-  ABS(EXTRACT(DAY FROM "{col}")) || ' ' || ABS(EXTRACT(HOUR FROM "{col}")) || ':' || 
-  ABS(EXTRACT(MINUTE FROM "{col}")) || ':' || ABS(EXTRACT(SECOND FROM "{col}")) END
-```
+- **Virtual Columns**: Implemented as **BigQuery Views** using DATA_DEFAULT logic.
+- **Intervals**: Custom SQL transformations ensure Oracle `INTERVAL` types match BigQuery's expected string literal format.
+- **Oracle NUMBER**: Mapped dynamically based on precision/scale (mapped in `mapping.rs`).
 
 ---
 
 ## 🛠️ Maintainer Notes
 
 *   **Adding a Type**: Update `map_oracle_to_arrow` in [`mapping.rs`](src/domain/mapping.rs).
-*   **Integration Testing**: Run [`tests/scripts/run_all.sh`](tests/scripts/run_all.sh) to execute the full 360-degree verification suite.
+*   **Integration Testing**: Run [`tests/scripts/run_all.sh`](tests/scripts/run_all.sh).

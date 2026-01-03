@@ -1,46 +1,52 @@
-//! Infrastructure adapter for reading Oracle schema metadata and calculating chunks.
+//! # Oracle Metadata Adapter
+//!
+//! This is the "Brain" for Oracle discovery. It knows how to talk to Oracle's
+//! system catalog to find out what tables and columns exist.
+//!
+//! It also handles "Parallel Chunking" by using the built-in Oracle
+//! `DBMS_PARALLEL_EXECUTE` package.
 
-use crate::domain::mapping;
-use crate::domain::errors::{ExportError, Result};
 use crate::domain::entities::{ColumnMetadata, TableMetadata};
+use crate::domain::errors::{ExportError, Result};
+use crate::domain::mapping;
+use crate::infrastructure::oracle::connection_manager::OracleConnectionManager;
 use crate::ports::metadata_port::MetadataPort;
 use log::{debug, info, warn};
 use oracle::Connection;
 use r2d2::Pool;
-use crate::infrastructure::oracle::connection_manager::OracleConnectionManager;
 use std::sync::Arc;
 
-/// Concrete implementation of `MetadataPort` for Oracle databases.
-///
-/// This adapter uses standard Oracle system views and the `DBMS_PARALLEL_EXECUTE`
-/// package to discover schema information and plan parallel workloads.
+/// `MetadataAdapter` implements the `MetadataPort`.
 pub struct MetadataAdapter {
     pool: Arc<Pool<OracleConnectionManager>>,
 }
 
 impl MetadataAdapter {
-    /// Creates a new MetadataAdapter with a shared connection pool.
     pub fn new(pool: Arc<Pool<OracleConnectionManager>>) -> Self {
         Self { pool }
     }
 
-    /// Obtains a connection from the pool.
     fn get_conn(&self) -> Result<r2d2::PooledConnection<OracleConnectionManager>> {
-        self.pool.get()
-            .map_err(|e| ExportError::OracleError(format!("Failed to get connection from pool: {}", e)))
+        self.pool.get().map_err(|e| {
+            ExportError::OracleError(format!("Failed to get connection from pool: {}", e))
+        })
     }
 }
 
-// SQL Constants (Preserved from oracle_metadata.rs)
+// --- ORACLE DICTIONARY QUERIES ---
+// These are standard SQL queries that look into Oracle's metadata tables.
+
+/// Lists all tables owned by a specific user.
 const SQL_LIST_TABLES: &str =
     "SELECT table_name FROM all_tables WHERE owner = :1 ORDER BY table_name";
+
+/// Tries to find the size of a table (in GB).
 const SQL_SEGMENTS_SIZE: &str = "SELECT SUM(bytes) / 1024 / 1024 / 1024 FROM all_segments WHERE owner = :1 AND segment_name = :2";
-const SQL_USER_SEGMENTS_SIZE: &str =
-    "SELECT SUM(bytes) / 1024 / 1024 / 1024 FROM user_segments WHERE segment_name = :1";
-const SQL_TABLE_STATS: &str =
-    "SELECT num_rows, avg_row_len FROM all_tables WHERE owner = :1 AND table_name = :2";
-const SQL_TABLE_BLOCKS: &str = "SELECT blocks FROM all_tables WHERE owner = :1 AND table_name = :2";
+
+/// Fetches the ROWID ranges for a specific parallel task.
 const SQL_FETCH_CHUNKS: &str = "SELECT start_rowid, end_rowid FROM user_parallel_execute_chunks WHERE task_name = :1 ORDER BY start_rowid";
+
+/// Finds primary key columns.
 const SQL_GET_PK: &str = "
     SELECT column_name
     FROM all_cons_columns c
@@ -50,6 +56,8 @@ const SQL_GET_PK: &str = "
       AND k.table_name = :2
     ORDER BY c.position
 ";
+
+/// THE BIG ONE: Fetches every column in a table along with its type and comments.
 pub const SQL_GET_COLUMNS: &str = "
     SELECT c.column_name, c.data_type, cm.comments, c.virtual_column, c.hidden_column, c.identity_column, c.user_generated
     FROM all_tab_cols c
@@ -61,20 +69,9 @@ pub const SQL_GET_COLUMNS: &str = "
       AND c.owner = :2 
     ORDER BY c.column_id, c.internal_column_id
 ";
-const SQL_GET_PARTITION_KEYS: &str = "
-    SELECT column_name
-    FROM all_part_key_columns
-    WHERE owner = :1 AND name = :2 AND object_type = 'TABLE'
-    ORDER BY column_position
-";
-const SQL_GET_INDEXES: &str = "
-    SELECT column_name
-    FROM all_ind_columns
-    WHERE table_owner = :1 AND table_name = :2
-    ORDER BY index_name, column_position
-";
 
 impl MetadataPort for MetadataAdapter {
+    /// Returns a simple list of strings containing table names.
     fn get_tables(&self, schema_name: &str) -> Result<Vec<String>> {
         let conn = self.get_conn()?;
         let rows = conn
@@ -83,17 +80,21 @@ impl MetadataPort for MetadataAdapter {
         let mut tables = Vec::new();
         for row_result in rows {
             let row = row_result.map_err(|e| ExportError::OracleError(e.to_string()))?;
-            let name: String = row.get(0).map_err(|e| ExportError::OracleError(e.to_string()))?;
+            let name: String = row
+                .get(0)
+                .map_err(|e| ExportError::OracleError(e.to_string()))?;
             tables.push(name);
         }
         Ok(tables)
     }
 
+    /// Fetches all the details for a table.
     fn get_table_metadata(&self, schema: &str, table: &str) -> Result<TableMetadata> {
         let conn = self.get_conn()?;
         let schema_up = schema.to_uppercase();
         let table_up = table.to_uppercase();
 
+        // We run multiple small queries to gather all the metadata pieces.
         let size_gb = self.fetch_size(&conn, &schema_up, &table_up)?;
         let columns = self.fetch_columns(&conn, &schema_up, &table_up)?;
         let pk_cols = self.fetch_pk(&conn, &schema_up, &table_up)?;
@@ -111,6 +112,7 @@ impl MetadataPort for MetadataAdapter {
         })
     }
 
+    /// Retrieves CPU count from Oracle's parameters (requires SELECT on V$ views).
     fn get_db_cpu_count(&self) -> Result<usize> {
         let conn = self.get_conn()?;
         let row = conn
@@ -119,12 +121,21 @@ impl MetadataPort for MetadataAdapter {
                 &[],
             )
             .map_err(|e| ExportError::OracleError(e.to_string()))?;
-        let count_str: String = row.get(0).map_err(|e| ExportError::OracleError(e.to_string()))?;
+        let count_str: String = row
+            .get(0)
+            .map_err(|e| ExportError::OracleError(e.to_string()))?;
         count_str
             .parse::<usize>()
             .map_err(|_| ExportError::MetadataError("Failed to parse cpu_count".to_string()))
     }
 
+    /// CHUNKING LOGIC: Uses Oracle's internal parallel execution package.
+    ///
+    /// The process is:
+    /// 1. Create a "Task" in Oracle.
+    /// 2. Oracle calculates "Chunks" (ranges of ROWIDs) based on the tables blocks.
+    /// 3. We fetch these ranges into Rust and use them to create parallel export threads.
+    /// 4. Drop the task.
     fn generate_table_chunks(
         &self,
         schema: &str,
@@ -134,6 +145,7 @@ impl MetadataPort for MetadataAdapter {
         let conn = self.get_conn()?;
         let task_name = format!("EXP_{}_{}", table, chrono::Utc::now().timestamp());
 
+        // Cleanup any old crashed tasks with the same name.
         let _ = conn.execute(
             "BEGIN DBMS_PARALLEL_EXECUTE.DROP_TASK(:1); END;",
             &[&task_name],
@@ -142,21 +154,29 @@ impl MetadataPort for MetadataAdapter {
             "BEGIN DBMS_PARALLEL_EXECUTE.CREATE_TASK(:1); END;",
             &[&task_name],
         )
-        .map_err(|e| ExportError::OracleError(format!("Failed to create parallel task '{}': {}", task_name, e)))?;
+        .map_err(|e| {
+            ExportError::OracleError(format!(
+                "Failed to create parallel task '{}': {}",
+                task_name, e
+            ))
+        })?;
 
-        // Use a closure or internal function to wrap the logic so we can always cleanup
+        // Internal function to run the actual chunking logic.
         let run_plan = |conn: &oracle::Connection| -> Result<Vec<String>> {
+            // How many blocks are in this table?
             let total_blocks: u64 = match conn.query_row(
-                SQL_TABLE_BLOCKS,
+                "SELECT blocks FROM all_tables WHERE owner = :1 AND table_name = :2",
                 &[&schema.to_uppercase(), &table.to_uppercase()],
             ) {
                 Ok(row) => row.get::<usize, u64>(0).unwrap_or(1000),
                 Err(_) => 1000,
             };
 
+            // Divide blocks by chunk_count to decide chunk size.
             let blocks_per_chunk = (total_blocks as f64 / chunk_count as f64).ceil() as i64;
             let blocks_per_chunk = std::cmp::max(1, blocks_per_chunk);
 
+            // Oracle actually does the heavy math here.
             conn.execute(
                 "BEGIN DBMS_PARALLEL_EXECUTE.CREATE_CHUNKS_BY_ROWID(:1, :2, :3, FALSE, :4); END;",
                 &[
@@ -166,17 +186,30 @@ impl MetadataPort for MetadataAdapter {
                     &blocks_per_chunk,
                 ],
             )
-            .map_err(|e| ExportError::OracleError(format!("Failed to create chunks for task '{}': {}", task_name, e)))?;
+            .map_err(|e| {
+                ExportError::OracleError(format!(
+                    "Failed to create chunks for task '{}': {}",
+                    task_name, e
+                ))
+            })?;
 
-            let rows = conn
-                .query(SQL_FETCH_CHUNKS, &[&task_name])
-                .map_err(|e| ExportError::OracleError(format!("Failed to fetch chunks for task '{}': {}", task_name, e)))?;
-            
+            // Fetch the calculated ROWID ranges.
+            let rows = conn.query(SQL_FETCH_CHUNKS, &[&task_name]).map_err(|e| {
+                ExportError::OracleError(format!(
+                    "Failed to fetch chunks for task '{}': {}",
+                    task_name, e
+                ))
+            })?;
+
             let mut chunks = Vec::new();
             for r in rows {
                 let row = r.map_err(|e| ExportError::OracleError(e.to_string()))?;
-                let start: String = row.get(0).map_err(|e| ExportError::OracleError(e.to_string()))?;
-                let end: String = row.get(1).map_err(|e| ExportError::OracleError(e.to_string()))?;
+                let start: String = row
+                    .get(0)
+                    .map_err(|e| ExportError::OracleError(e.to_string()))?;
+                let end: String = row
+                    .get(1)
+                    .map_err(|e| ExportError::OracleError(e.to_string()))?;
                 chunks.push(format!("ROWID BETWEEN '{}' AND '{}'", start, end));
             }
             Ok(chunks)
@@ -184,7 +217,7 @@ impl MetadataPort for MetadataAdapter {
 
         let result = run_plan(&conn);
 
-        // Always attempt to drop the task
+        // Always drop the task when finished.
         if let Err(e) = conn.execute(
             "BEGIN DBMS_PARALLEL_EXECUTE.DROP_TASK(:1); END;",
             &[&task_name],
@@ -195,6 +228,7 @@ impl MetadataPort for MetadataAdapter {
         result
     }
 
+    /// VALIDATION: Queries Oracle for SUMs and COUNTs to verify data fidelity.
     fn validate_table(
         &self,
         schema: &str,
@@ -205,7 +239,7 @@ impl MetadataPort for MetadataAdapter {
         let conn = self.get_conn()?;
         info!("Validating {}.{}", schema, table);
 
-        // Tier 1: Row Count
+        // Row count is the most basic check.
         let count_sql = format!("SELECT COUNT(*) FROM \"{}\".\"{}\"", schema, table);
         let row_count: u64 = conn
             .query_row(&count_sql, &[])
@@ -213,7 +247,7 @@ impl MetadataPort for MetadataAdapter {
             .get::<usize, u64>(0)
             .map_err(|e| ExportError::OracleError(e.to_string()))?;
 
-        // Tier 2: PK Hash
+        // Primary Key Hash verify that every row is uniqueness.
         let mut pk_hash = None;
         if let Some(pks) = pk_cols {
             if !pks.is_empty() {
@@ -239,7 +273,7 @@ impl MetadataPort for MetadataAdapter {
             }
         }
 
-        // Tier 3: Aggregates
+        // Aggregate sums for numeric columns.
         let mut aggregates = None;
         if let Some(cols) = agg_cols {
             let mut agg_results = Vec::new();
@@ -270,8 +304,9 @@ impl MetadataPort for MetadataAdapter {
 }
 
 impl MetadataAdapter {
-    /// Queries the size of a table in Gigabytes using multiple fallback strategies.
-    fn fetch_size(&self, conn: &Connection, schema: &str, table: &str) -> Result<f64> {
+    /// Queries the size of a table (in GB) using fallback views.
+    fn fetch_size(&self, conn: &oracle::Connection, schema: &str, table: &str) -> Result<f64> {
+        // Try ALL_SEGMENTS first (requires privileges).
         let size_res = conn.query(SQL_SEGMENTS_SIZE, &[&schema, &table]);
         match size_res {
             Ok(mut rows) => {
@@ -284,7 +319,11 @@ impl MetadataAdapter {
             Err(e) => warn!("Failed to query ALL_SEGMENTS: {}", e),
         }
 
-        if let Ok(mut rows) = conn.query(SQL_USER_SEGMENTS_SIZE, &[&table]) {
+        // Try USER_SEGMENTS (only works for current user).
+        if let Ok(mut rows) = conn.query(
+            "SELECT SUM(bytes) / 1024 / 1024 / 1024 FROM user_segments WHERE segment_name = :1",
+            &[&table],
+        ) {
             if let Some(Ok(r)) = rows.next() {
                 if let Ok(Some(s)) = r.get::<usize, Option<f64>>(0) {
                     return Ok(s);
@@ -292,7 +331,11 @@ impl MetadataAdapter {
             }
         }
 
-        if let Ok(row) = conn.query_row(SQL_TABLE_STATS, &[&schema, &table]) {
+        // Final fallback: Estimate size from table stats.
+        if let Ok(row) = conn.query_row(
+            "SELECT num_rows, avg_row_len FROM all_tables WHERE owner = :1 AND table_name = :2",
+            &[&schema, &table],
+        ) {
             let num_rows: Option<u64> = row.get(0).unwrap_or(None);
             let avg_len: Option<u64> = row.get(1).unwrap_or(None);
             if let (Some(rows), Some(len)) = (num_rows, avg_len) {
@@ -303,7 +346,7 @@ impl MetadataAdapter {
         Ok(0.0)
     }
 
-    /// Discovers all columns for a table and maps them to BigQuery types.
+    /// Discovers columns and handles a "Fake Query" to get precise data types.
     fn fetch_columns(
         &self,
         conn: &Connection,
@@ -345,11 +388,15 @@ impl MetadataAdapter {
             });
         }
 
+        // We filter out internal Oracle columns that users didn't create.
         entries.retain(|e| !e.is_hidden || e.is_user_gen);
         if entries.is_empty() {
             return Ok(vec![]);
         }
 
+        // THE TRICK: We run a "SELECT ... WHERE 1=0" query.
+        // This doesn't return any rows, but it DOES return the "Column Info"
+        // which tells us exactly what Oracle internal types these columns are.
         let quoted_names: Vec<String> = entries.iter().map(|e| format!("\"{}\"", e.name)).collect();
         let sql_dummy = format!(
             "SELECT {} FROM \"{}\".\"{}\" WHERE 1=0",
@@ -378,6 +425,7 @@ impl MetadataAdapter {
             final_cols.push(ColumnMetadata {
                 name: e.name.clone(),
                 raw_type: e.data_type.clone(),
+                // Use our domain mapper to bridge Oracle -> BigQuery!
                 bq_type: mapping::map_oracle_to_bq(&otype, Some(&e.data_type)),
                 is_virtual: e.is_virtual,
                 is_hidden: e.is_hidden,
@@ -388,7 +436,6 @@ impl MetadataAdapter {
         Ok(final_cols)
     }
 
-    /// Fetches primary key column names for the specified table.
     fn fetch_pk(&self, conn: &Connection, schema: &str, table: &str) -> Result<Vec<String>> {
         let rows = conn
             .query(SQL_GET_PK, &[&schema, &table])
@@ -401,7 +448,6 @@ impl MetadataAdapter {
         Ok(pks)
     }
 
-    /// Fetches partition key column names for the specified table.
     fn fetch_partitions(
         &self,
         conn: &Connection,
@@ -409,7 +455,7 @@ impl MetadataAdapter {
         table: &str,
     ) -> Result<Vec<String>> {
         let rows = conn
-            .query(SQL_GET_PARTITION_KEYS, &[&schema, &table])
+            .query("SELECT column_name FROM all_part_key_columns WHERE owner = :1 AND name = :2 AND object_type = 'TABLE' ORDER BY column_position", &[&schema, &table])
             .map_err(ExportError::from)?;
         let mut parts = Vec::new();
         for r in rows {
@@ -419,10 +465,9 @@ impl MetadataAdapter {
         Ok(parts)
     }
 
-    /// Fetches all indexed column names for the specified table.
     fn fetch_indexes(&self, conn: &Connection, schema: &str, table: &str) -> Result<Vec<String>> {
         let rows = conn
-            .query(SQL_GET_INDEXES, &[&schema, &table])
+            .query("SELECT column_name FROM all_ind_columns WHERE table_owner = :1 AND table_name = :2 ORDER BY index_name, column_position", &[&schema, &table])
             .map_err(ExportError::from)?;
         let mut idxs = Vec::new();
         for r in rows {
@@ -444,23 +489,29 @@ pub fn get_virtual_columns_map(
 ) -> std::collections::HashMap<String, String> {
     let sql = "SELECT column_name, data_default FROM all_tab_cols WHERE owner = :1 AND table_name = :2 AND virtual_column = 'YES'";
     let mut map = std::collections::HashMap::new();
-    
+
     // Explicitly set log level to debug for this discovery step
-    debug!("Fetching virtual column expressions for {}.{}", schema, table);
-    
+    debug!(
+        "Fetching virtual column expressions for {}.{}",
+        schema, table
+    );
+
     match conn.query(sql, &[&schema.to_uppercase(), &table.to_uppercase()]) {
         Ok(rows) => {
             for row_res in rows {
                 match row_res {
                     Ok(row) => {
                         let name: String = row.get(0).unwrap_or_default();
-                        let expr: Option<String> = row.get(1).map_err(|e| {
-                            warn!("Failed to fetch DATA_DEFAULT for {}.{}: {}", table, name, e);
-                            e
-                        }).unwrap_or(None);
+                        let expr: Option<String> = row
+                            .get(1)
+                            .map_err(|e| {
+                                warn!("Failed to fetch DATA_DEFAULT for {}.{}: {}", table, name, e);
+                                e
+                            })
+                            .unwrap_or(None);
 
                         if let Some(e) = expr {
-                            // OCI default buffer for LONG is often 32KB. 
+                            // OCI default buffer for LONG is often 32KB.
                             // If exactly matching or very close, warn about potential truncation.
                             if e.len() >= 32760 {
                                 warn!("Virtual column expression for {}.{} is very long ({} bytes). It might be truncated.", 
@@ -468,12 +519,15 @@ pub fn get_virtual_columns_map(
                             }
                             map.insert(name.to_uppercase(), e.trim().to_string());
                         }
-                    },
+                    }
                     Err(e) => warn!("Error iteration over virtual columns: {}", e),
                 }
             }
-        },
-        Err(e) => warn!("Failed to query virtual columns for {}.{}: {}", schema, table, e),
+        }
+        Err(e) => warn!(
+            "Failed to query virtual columns for {}.{}: {}",
+            schema, table, e
+        ),
     }
     map
 }

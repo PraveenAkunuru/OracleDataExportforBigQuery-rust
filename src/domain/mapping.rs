@@ -1,161 +1,127 @@
-//! Core logic for mapping Oracle source types to BigQuery target types.
+//! # Type Mapping Logic
 //!
-//! This module handles the conversion of various Oracle data types (including
-//! specialized types like XMLTYPE and SDO_GEOMETRY) into their BigQuery
-//! equivalents used in schema generation and DDL creation.
+//! This module is the "Translator". Oracle and BigQuery speak different languages
+//! when it comes to data types. This module ensures that a `NUMBER(10,0)` in
+//! Oracle becomes an `INT64` in BigQuery, and so on.
+//!
+//! We map each Oracle type to three different things:
+//! 1. **BigQuery Type**: The logical type used in JSON schemas (e.g., `STRING`).
+//! 2. **BigQuery DDL Type**: The physical type used in `CREATE TABLE` statements (e.g., `NUMERIC(10,2)`).
+//! 3. **Arrow Type**: The internal memory format used by the `Parquet` writer.
 
 use arrow_schema::DataType;
 use oracle::sql_type::OracleType;
 
-/// Maps an Oracle `sql_type::OracleType` and an optional raw type name to a BigQuery data type.
-pub fn map_oracle_to_bq(oracle_type: &OracleType, raw_type: Option<&str>) -> String {
-    if let Some(r) = raw_type {
-        let upper = r.to_uppercase();
-        if upper.contains("XMLTYPE") {
-            return "STRING".to_string();
-        }
-        if upper.contains("JSON") {
-            return "JSON".to_string();
-        }
-        if upper.contains("BOOLEAN") {
-            return "BOOL".to_string();
-        }
-        if upper.contains("SDO_GEOMETRY") {
-            return "STRING".to_string();
-        }
-        if upper.contains("UROWID") {
-            return "STRING".to_string();
-        }
-    }
-
-    match oracle_type {
-        OracleType::Number(precision, scale) => {
-            if *scale == 0 {
-                if *precision > 0 && *precision <= 18 {
-                    "INT64".to_string()
-                } else {
-                    "BIGNUMERIC".to_string()
-                }
-            } else if *scale == -127 {
-                if *precision == 0 {
-                    "BIGNUMERIC".to_string()
-                } else {
-                    "FLOAT64".to_string()
-                }
-            } else {
-                "BIGNUMERIC".to_string()
-            }
-        }
-        OracleType::Int64 => "INTEGER".to_string(),
-        OracleType::Float(_) | OracleType::BinaryFloat | OracleType::BinaryDouble => {
-            "FLOAT64".to_string()
-        }
-        OracleType::Char(_)
-        | OracleType::NChar(_)
-        | OracleType::Varchar2(_)
-        | OracleType::NVarchar2(_)
-        | OracleType::Long
-        | OracleType::CLOB
-        | OracleType::NCLOB
-        | OracleType::Rowid => "STRING".to_string(),
-        OracleType::Date | OracleType::Timestamp(_) => "DATETIME".to_string(),
-        OracleType::TimestampTZ(_) | OracleType::TimestampLTZ(_) => "TIMESTAMP".to_string(),
-        OracleType::IntervalYM(..) | OracleType::IntervalDS(..) => "INTERVAL".to_string(),
-        OracleType::Xml => "STRING".to_string(),
-        OracleType::Boolean => "BOOL".to_string(),
-        OracleType::Raw(_) | OracleType::BLOB | OracleType::BFILE => "BYTES".to_string(),
-        _ => "STRING".to_string(),
-    }
+/// `MappingEntry` holds the three-way mapping for a single column.
+pub struct MappingEntry {
+    /// BigQuery schema type (e.g., "STRING", "INT64").
+    pub bq_type: String,
+    /// BigQuery DDL type (e.g., "NUMERIC(38,9)").
+    pub bq_ddl_type: String,
+    /// Apache Arrow memory type (e.g., `DataType::Int64`).
+    pub arrow_type: DataType,
 }
 
-/// Maps Oracle DB types to BigQuery SQL DDL types.
-pub fn map_oracle_to_bq_ddl(oracle_type: &OracleType, raw_type: Option<&str>) -> String {
+/// The main translation function.
+///
+/// It takes an `OracleType` (provided by the Oracle driver) and an optional
+/// `raw_type` (the string name of the type from Oracle metadata).
+pub fn get_mapping(oracle_type: &OracleType, raw_type: Option<&str>) -> MappingEntry {
+    // --- SPECIAL TYPES ---
+    // Oracle often stores XML, JSON, or Geometry data in CLOB/BLOB columns.
+    // We check the "raw name" from metadata to identify these special cases.
     if let Some(r) = raw_type {
         let upper = r.to_uppercase();
-        if upper.contains("XMLTYPE") {
-            return "STRING".to_string();
+        // XML and Spatial data go into BigQuery as plain STRINGs.
+        if upper.contains("XMLTYPE") || upper.contains("SDO_GEOMETRY") || upper.contains("UROWID") {
+            return MappingEntry {
+                bq_type: "STRING".to_string(),
+                bq_ddl_type: "STRING".to_string(),
+                arrow_type: DataType::Utf8,
+            };
         }
+        // Native JSON support in BigQuery!
         if upper.contains("JSON") {
-            return "JSON".to_string();
+            return MappingEntry {
+                bq_type: "JSON".to_string(),
+                bq_ddl_type: "JSON".to_string(),
+                arrow_type: DataType::Utf8,
+            };
         }
+        // Oracle 23c introduced native BOOLEAN.
         if upper.contains("BOOLEAN") {
-            return "BOOL".to_string();
+            return MappingEntry {
+                bq_type: "BOOL".to_string(),
+                bq_ddl_type: "BOOL".to_string(),
+                arrow_type: DataType::Boolean,
+            };
         }
     }
 
+    // --- STANDARD TYPES ---
     match oracle_type {
+        // Oracle NUMBER is tricky because it can be an integer, a decimal, or a float.
         OracleType::Number(prec, scale) => {
-            if *scale == -127 {
+            let (bq, ddl, arrow) = if *scale == -127 {
+                // scale -127 means it's a FLOAT in Oracle.
                 if *prec == 0 {
-                    "BIGNUMERIC".to_string()
+                    (
+                        "BIGNUMERIC".to_string(),
+                        "BIGNUMERIC".to_string(),
+                        DataType::Utf8,
+                    )
                 } else {
-                    "FLOAT64".to_string()
+                    (
+                        "FLOAT64".to_string(),
+                        "FLOAT64".to_string(),
+                        DataType::Float64,
+                    )
                 }
             } else if *scale == 0 {
+                // scale 0 means it's an INTEGER.
                 if *prec > 0 && *prec <= 18 {
-                    "INT64".to_string()
+                    // Fits in a standard 64-bit integer.
+                    ("INT64".to_string(), "INT64".to_string(), DataType::Int64)
                 } else {
-                    "BIGNUMERIC".to_string()
+                    // Too big for INT64, use BIGNUMERIC.
+                    (
+                        "BIGNUMERIC".to_string(),
+                        "BIGNUMERIC".to_string(),
+                        DataType::Utf8,
+                    )
                 }
             } else {
+                // It's a DECIMAL (e.g., NUMBER(10,2)).
                 let p = *prec;
                 let s = *scale;
-                if (s > 0 && s <= 9) && (p > 0 && p <= 38) {
+                let ddl_str = if (s > 0 && s <= 9) && (p > 0 && p <= 38) {
                     format!("NUMERIC({}, {})", p, s)
                 } else {
                     format!("BIGNUMERIC({}, {})", p, s)
-                }
-            }
-        }
-        t => map_oracle_to_bq(t, raw_type),
-    }
-}
-
-/// Maps an Oracle `sql_type::OracleType` and an optional raw type name to an Arrow `DataType`.
-pub fn map_oracle_to_arrow(oracle_type: &OracleType, raw_type: Option<&str>) -> DataType {
-    if let Some(r) = raw_type {
-        let upper = r.to_uppercase();
-        if upper.contains("XMLTYPE") || upper.contains("SDO_GEOMETRY") || upper.contains("UROWID") {
-            return DataType::Utf8;
-        }
-        if upper.contains("JSON") {
-            return DataType::Utf8; // or DataType::Utf8Json if supported, but Utf8 is safe
-        }
-        if upper.contains("BOOLEAN") {
-            return DataType::Boolean;
-        }
-    }
-
-    match oracle_type {
-        OracleType::Number(precision, scale) => {
-            if *scale == 0 {
-                if *precision > 0 && *precision <= 18 {
-                    DataType::Int64
-                } else {
-                    DataType::Utf8 // Fallback for very large integers as strings for now, or Decimal128
-                }
-            } else if *scale == -127 {
-                if *precision == 0 {
-                    DataType::Utf8 // Float as string fallback? No, let's use Float64 if possible
-                } else {
-                    DataType::Float64
-                }
-            } else {
-                // For decimals, we could use Decimal128, but Utf8 is safe for BQ parity if unsure.
-                // However, the review asks for native types.
-                let p = *precision;
-                let s = *scale;
-                if (1..=38).contains(&p) && (0..=38).contains(&s) {
+                };
+                let arrow_t = if (1..=38).contains(&p) && (0..=38).contains(&s) {
                     DataType::Decimal128(p, s)
                 } else {
+                    // Arrow Decimal has some limits, so we fallback to String for extreme cases.
                     DataType::Utf8
-                }
+                };
+                ("BIGNUMERIC".to_string(), ddl_str, arrow_t)
+            };
+            MappingEntry {
+                bq_type: bq,
+                bq_ddl_type: ddl,
+                arrow_type: arrow,
             }
         }
-        OracleType::Int64 => DataType::Int64,
-        OracleType::Float(_) | OracleType::BinaryFloat | OracleType::BinaryDouble => {
-            DataType::Float64
-        }
+
+        // Floating point numbers.
+        OracleType::Float(_) | OracleType::BinaryFloat | OracleType::BinaryDouble => MappingEntry {
+            bq_type: "FLOAT64".to_string(),
+            bq_ddl_type: "FLOAT64".to_string(),
+            arrow_type: DataType::Float64,
+        },
+
+        // Strings and Text.
         OracleType::Char(_)
         | OracleType::NChar(_)
         | OracleType::Varchar2(_)
@@ -163,17 +129,57 @@ pub fn map_oracle_to_arrow(oracle_type: &OracleType, raw_type: Option<&str>) -> 
         | OracleType::Long
         | OracleType::CLOB
         | OracleType::NCLOB
-        | OracleType::Rowid => DataType::Utf8,
-        OracleType::Date | OracleType::Timestamp(_) => {
-            DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None)
-        }
-        OracleType::TimestampTZ(_) | OracleType::TimestampLTZ(_) => {
-            DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, Some("UTC".into()))
-        }
-        OracleType::Boolean => DataType::Boolean,
-        OracleType::Raw(_) | OracleType::BLOB | OracleType::BFILE => DataType::Binary,
-        _ => DataType::Utf8,
+        | OracleType::Rowid => MappingEntry {
+            bq_type: "STRING".to_string(),
+            bq_ddl_type: "STRING".to_string(),
+            arrow_type: DataType::Utf8,
+        },
+
+        // Dates and Times.
+        OracleType::Date | OracleType::Timestamp(_) => MappingEntry {
+            bq_type: "DATETIME".to_string(),
+            bq_ddl_type: "DATETIME".to_string(),
+            arrow_type: DataType::Timestamp(arrow_schema::TimeUnit::Microsecond, None),
+        },
+
+        // Timezones.
+        OracleType::TimestampTZ(_) | OracleType::TimestampLTZ(_) => MappingEntry {
+            bq_type: "TIMESTAMP".to_string(),
+            bq_ddl_type: "TIMESTAMP".to_string(),
+            arrow_type: DataType::Timestamp(
+                arrow_schema::TimeUnit::Microsecond,
+                Some("UTC".into()),
+            ),
+        },
+
+        // Binary Data (Images, PDFs, etc).
+        // We export these as Base64 encoded strings in CSV, or raw Bytes in Parquet.
+        OracleType::Raw(_) | OracleType::BLOB | OracleType::BFILE => MappingEntry {
+            bq_type: "BYTES".to_string(),
+            bq_ddl_type: "BYTES".to_string(),
+            arrow_type: DataType::Binary,
+        },
+
+        // Default fallback: treat as String.
+        _ => MappingEntry {
+            bq_type: "STRING".to_string(),
+            bq_ddl_type: "STRING".to_string(),
+            arrow_type: DataType::Utf8,
+        },
     }
+}
+
+// Helper functions for common lookups.
+pub fn map_oracle_to_bq(oracle_type: &OracleType, raw_type: Option<&str>) -> String {
+    get_mapping(oracle_type, raw_type).bq_type
+}
+
+pub fn map_oracle_to_bq_ddl(oracle_type: &OracleType, raw_type: Option<&str>) -> String {
+    get_mapping(oracle_type, raw_type).bq_ddl_type
+}
+
+pub fn map_oracle_to_arrow(oracle_type: &OracleType, raw_type: Option<&str>) -> DataType {
+    get_mapping(oracle_type, raw_type).arrow_type
 }
 
 #[cfg(test)]
