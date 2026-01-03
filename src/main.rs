@@ -32,7 +32,7 @@ use crate::infrastructure::artifacts::artifact_adapter::ArtifactAdapter;
 use crate::infrastructure::oracle::extractor::Extractor;
 use crate::infrastructure::oracle::metadata::MetadataAdapter;
 use clap::Parser;
-use log::{error, info};
+use log::{debug, error, info};
 use std::process;
 use std::sync::Arc;
 
@@ -70,8 +70,17 @@ fn main() {
     // --- STEP 2: RUNTIME INITIALIZATION ---
     // The RuntimeContext manages resources like the Oracle connection pool and Rayon thread pool.
     let runtime = crate::application::runtime::RuntimeContext::init(&config).unwrap_or_else(|e| {
-        error!("Runtime initialization failed: {}", e);
-        process::exit(1);
+        let err_msg = e.to_string();
+        error!("Runtime initialization failed: {}", err_msg);
+        
+        // Resilience: Suggest wrapper script for common library path issues
+        if err_msg.contains("DPI-1047") {
+            eprintln!("\n\x1b[31mError: Oracle Client libraries not found (DPI-1047).\x1b[0m");
+            eprintln!("To fix this, try running with the helper script:");
+            eprintln!("\n    \x1b[32m./scripts/run_with_env.sh cargo run --release -- ...\x1b[0m\n");
+        }
+        
+        std::process::exit(1);
     });
 
     // --- STEP 3: COMPONENT WIRING (ports & adapters) ---
@@ -112,6 +121,7 @@ fn main() {
     info!("Starting Export process...");
     match orchestrator.run() {
         Ok(results) => {
+            debug!("Orchestrator run finished. Results: {}", results.len());
             let success_count = results.iter().filter(|r| r.status == "SUCCESS").count();
             let total_count = results.len();
             info!(

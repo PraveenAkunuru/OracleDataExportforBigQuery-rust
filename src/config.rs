@@ -112,6 +112,8 @@ pub struct ExportConfig {
     pub parquet_compression: Option<String>,
     /// Number of rows to buffer before writing a Parquet/Arrow batch (default 10000)
     pub parquet_batch_size: Option<usize>,
+    /// Custom WHERE clause to filter rows (e.g. for debugging)
+    pub query_where: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -213,6 +215,9 @@ impl AppConfig {
         }
         if let Some(o) = &args.output {
             self.export.output_dir = o.clone();
+        }
+        if let Some(qw) = &args.query_where {
+            self.export.query_where = Some(qw.clone());
         }
         if args.load {
             self.export.load_to_bq = Some(true);
@@ -371,6 +376,7 @@ impl AppConfig {
                     }),
                 parquet_compression: args.compression.clone(),
                 parquet_batch_size: args.parquet_batch_size,
+                query_where: args.query_where.clone(),
             },
             bigquery: None,
             gcp: None,
@@ -449,6 +455,7 @@ export:
                 file_format: None,
                 parquet_compression: None,
                 parquet_batch_size: None,
+                query_where: None,
             },
             bigquery: None,
             gcp: None,

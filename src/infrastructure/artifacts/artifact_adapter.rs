@@ -286,7 +286,7 @@ impl ArtifactAdapter {
             metadata.table_name.clone()
         };
         format!(
-            "#!/bin/bash\n# BigQuery Load Command ({})\n# Run this from inside the config/ directory.\nset -e\nbq load --source_format={} {} --replace --schema=schema.json {}:{}.{} \"../data/{}\"\n",
+            "#!/bin/bash\n# BigQuery Load Command ({})\n# Run this from inside the config/ directory.\nset -e\nbq load --source_format={} {} --replace --schema=schema.json {}:{}.{} ../data/{}\n",
             fmt, fmt, args, self.project_id, self.dataset_id, table_name, ext
         )
     }

@@ -98,12 +98,9 @@ pub fn build_hash_from_parts(hash_parts: &[String]) -> String {
 pub fn build_column_expression(name: &str, data_type: &str) -> String {
     let upper_type = data_type.to_uppercase();
     let q_name = quote_ident(name);
-    
+
     if upper_type.contains("TIME ZONE") {
-        format!(
-            "TO_CHAR(SYS_EXTRACT_UTC({}), 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6\"Z\"')",
-            q_name
-        )
+        format!("SYS_EXTRACT_UTC({})", q_name)
     } else if upper_type == "XMLTYPE" {
         format!(
             "REPLACE(REPLACE(sys.XMLType.getClobVal({}), CHR(10), ''), CHR(13), '')",

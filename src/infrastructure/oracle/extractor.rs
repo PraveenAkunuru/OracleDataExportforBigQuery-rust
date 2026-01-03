@@ -35,6 +35,7 @@ use std::fs::File;
 use std::io::BufWriter;
 use std::sync::Arc;
 use std::time::Instant;
+use log::debug;
 
 use arrow_array::builder::*;
 use arrow_array::ArrayRef;
@@ -180,10 +181,23 @@ impl RowWriter for CsvRowWriter {
         self.count += 1;
         Ok(())
     }
-    fn finish(mut self: Box<Self>) -> Result<(u64, u64)> {
-        self.writer
+    fn finish(self: Box<Self>) -> Result<(u64, u64)> {
+        // Unwrap the CSV writer to get the GzEncoder.
+        let gz_encoder = self.writer.into_inner().map_err(|e| {
+            ExportError::ArtifactError(format!("Failed to flush CSV writer: {}", e))
+        })?;
+
+        // Finish the GzEncoder to write the footer.
+        let mut buf_writer = gz_encoder.finish().map_err(|e| {
+            ExportError::ArtifactError(format!("Failed to finish GZIP encoder: {}", e))
+        })?;
+
+        // Flush the underlying BufWriter.
+        use std::io::Write;
+        buf_writer
             .flush()
-            .map_err(|e| ExportError::ArtifactError(e.to_string()))?;
+            .map_err(ExportError::IoError)?;
+
         Ok((self.count, self.bytes))
     }
 }
@@ -266,15 +280,18 @@ impl ParquetRowWriter {
 
     /// Flushes the current batch of rows in memory to the file.
     fn flush(&mut self) -> Result<()> {
+        debug!("Flushing batch {}", self.current_batch);
         if self.current_batch == 0 {
             return Ok(());
         }
         let arrays: Vec<ArrayRef> = self.builders.iter_mut().map(|b| b.finish()).collect();
         let batch = arrow_array::RecordBatch::try_new(self.schema.clone(), arrays)
             .map_err(|e| ExportError::ArtifactError(e.to_string()))?;
+        debug!("RecordBatch created, writing...");
         self.writer
             .write(&batch)
             .map_err(|e| ExportError::ArtifactError(e.to_string()))?;
+        debug!("Batch written");
 
         // Reset builders for the next batch.
         self.builders = self
@@ -313,13 +330,14 @@ impl RowWriter for ParquetRowWriter {
 impl ExtractionPort for Extractor {
     /// The main export loop.
     fn export_task(&self, task: ExportTask, metadata: &TableMetadata) -> Result<TaskResult> {
+        debug!("Extractor entering task {:?}", task.chunk_id);
         let start_time = Instant::now();
-
         // 1. Get a connection from the pool.
         let conn = self
             .pool
             .get()
             .map_err(|e| ExportError::OracleError(e.to_string()))?;
+        debug!("Got connection");
 
         // 2. Build the SQL query (handled by sql_utils).
         let sql = build_export_query(
@@ -329,6 +347,7 @@ impl ExtractionPort for Extractor {
             task.enable_row_hash,
             task.query_where.as_deref(),
         );
+        debug!("Built SQL lengths: {}", sql.len());
 
         // 3. Prepare and execute the statement.
         let mut stmt = conn
@@ -336,10 +355,13 @@ impl ExtractionPort for Extractor {
             .prefetch_rows(self.prefetch_rows)
             .build()
             .map_err(|e| ExportError::OracleError(e.to_string()))?;
+        debug!("Statement built");
         let rows = stmt
             .query(&[])
             .map_err(|e| ExportError::OracleError(e.to_string()))?;
+        debug!("Query executed");
 
+        debug!("Creating writer");
         // 4. Create the appropriate writer based on format.
         // `Box<dyn RowWriter>` allows us to use either CsvRowWriter or ParquetRowWriter
         // through the same interface.
@@ -357,15 +379,21 @@ impl ExtractionPort for Extractor {
             )?),
         };
 
+        debug!("Starting loop");
         // 5. STREAMING LOOP
         // We iterate through every row returned by Oracle.
-        for row_res in rows {
+        for (i, row_res) in rows.enumerate() {
+            if i % 50000 == 0 {
+                debug!("Processing row {}", i);
+            }
             let row = row_res.map_err(|e| ExportError::OracleError(e.to_string()))?;
             writer.write_row(&row, self)?;
         }
+        debug!("Loop finished");
 
         // 6. Finalize and report.
         let (count, bytes) = writer.finish()?;
+        debug!("Writer finished (rows={}, bytes={})", count, bytes);
         Ok(TaskResult::success(
             task.schema,
             task.table,
@@ -504,11 +532,13 @@ fn create_push_builder(
             TimestampMicrosecondBuilder::with_capacity(cap),
         )),
         Binary => Box::new(BinaryPush(BinaryBuilder::with_capacity(cap, cap * 64))),
-        Decimal128(p, s) => Box::new(Decimal128Push(
+        Decimal128(p, s) => {
+            debug!("Creating Decimal128Builder(p={}, s={})", p, s);
+            Box::new(Decimal128Push(
             Decimal128Builder::with_capacity(cap)
                 .with_precision_and_scale(*p, *s)
-                .unwrap(),
-        )),
+                .expect("Failed to create Decimal128Builder"),
+        ))},
         _ => Box::new(StringPush(
             StringBuilder::with_capacity(cap, cap * 32),
             ot.clone(),

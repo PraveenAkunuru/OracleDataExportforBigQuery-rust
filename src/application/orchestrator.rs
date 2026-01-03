@@ -28,6 +28,7 @@
 
 use crate::config::AppConfig as Config;
 use crate::domain::entities::{ExportTask, FileFormat, TaskResult};
+use log::debug;
 use crate::domain::errors::Result;
 use crate::ports::artifact_port::ArtifactPort;
 use crate::ports::extraction_port::ExtractionPort;
@@ -239,7 +240,12 @@ impl Orchestrator {
                 schema: schema.to_string(),
                 table: table.to_string(),
                 chunk_id: None,
-                query_where: None,
+                query_where: self
+                    .config
+                    .export
+                    .query_where
+                    .clone()
+                    .or_else(|| Some("1=1".to_string())),
                 output_file: format!("{}/data.{}", data_dir, extension),
                 enable_row_hash,
                 use_client_hash: self.config.export.use_client_hash.unwrap_or(false),
@@ -256,7 +262,7 @@ impl Orchestrator {
                     schema: schema.to_string(),
                     table: table.to_string(),
                     chunk_id: Some(i as u32),
-                    query_where: Some(where_clause),
+                    query_where: Some(format!("{} AND 1=1", where_clause)),
                     output_file: format!("{}/data_chunk_{:04}.{}", data_dir, i, extension),
                     enable_row_hash,
                     use_client_hash: self.config.export.use_client_hash.unwrap_or(false),
@@ -278,6 +284,7 @@ impl Orchestrator {
         let results: Vec<TaskResult> = tasks
             .into_par_iter()
             .map(|task| {
+                debug!("Starting chunk {:?}", task.chunk_id);
                 self.extraction_port
                     .export_task(task, &metadata)
                     .unwrap_or_else(|e| {

@@ -80,8 +80,8 @@ pub fn get_mapping(oracle_type: &OracleType, raw_type: Option<&str>) -> MappingE
                 // scale -127 means it's a FLOAT in Oracle.
                 if *prec == 0 {
                     (
-                        "BIGNUMERIC".to_string(),
-                        "BIGNUMERIC".to_string(),
+                        "STRING".to_string(),
+                        "STRING".to_string(),
                         DataType::Utf8,
                     )
                 } else {
@@ -97,11 +97,11 @@ pub fn get_mapping(oracle_type: &OracleType, raw_type: Option<&str>) -> MappingE
                     // Fits in a standard 64-bit integer.
                     ("INT64".to_string(), "INT64".to_string(), DataType::Int64)
                 } else {
-                    // Too big for INT64, use BIGNUMERIC.
+                    // Too big for INT64, use BIGNUMERIC (Decimal128).
                     (
                         "BIGNUMERIC".to_string(),
                         "BIGNUMERIC".to_string(),
-                        DataType::Utf8,
+                        DataType::Decimal128(*prec, 0),
                     )
                 }
             } else {

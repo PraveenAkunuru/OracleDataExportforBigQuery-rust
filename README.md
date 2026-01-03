@@ -142,6 +142,12 @@ bash tests/scripts/run_all.sh
 
 ---
 
+## ❓ Troubleshooting
+
+For issues with connections, type mismatches, or crashes, see the **[Troubleshooting Guide](TROUBLESHOOTING.md)**.
+
+---
+
 ## 📜 License
 Apache License 2.0. See [LICENSE](LICENSE) for more information.
 
