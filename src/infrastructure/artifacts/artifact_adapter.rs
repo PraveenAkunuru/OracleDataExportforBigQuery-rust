@@ -51,6 +51,12 @@ impl ArtifactAdapter {
         f.write_all(content.as_bytes())?;
         Ok(())
     }
+
+    /// Securely quotes a string for use in a shell script.
+    /// Wraps in single quotes and escapes existing single quotes.
+    fn shell_quote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 impl ArtifactPort for ArtifactAdapter {
@@ -92,7 +98,8 @@ impl ArtifactPort for ArtifactAdapter {
         });
         self.write_file(
             config_path.join("metadata.json"),
-            &serde_json::to_string_pretty(&meta_json).unwrap(),
+            &serde_json::to_string_pretty(&meta_json)
+                .map_err(|e| ExportError::ArtifactError(e.to_string()))?,
         )
         .map_err(ExportError::IoError)?;
 
@@ -287,9 +294,14 @@ impl ArtifactAdapter {
         } else {
             metadata.table_name.clone()
         };
+
+        let safe_project = Self::shell_quote(&self.project_id);
+        let safe_dataset = Self::shell_quote(&self.dataset_id);
+        let safe_table = Self::shell_quote(&table_name);
+
         format!(
             "#!/bin/bash\n# BigQuery Load Command ({})\n# Run this from inside the config/ directory.\nset -e\nbq load --source_format={} {} --replace --schema=schema.json {}:{}.{} ../data/{}\n",
-            fmt, fmt, args, self.project_id, self.dataset_id, table_name, ext
+            fmt, fmt, args, safe_project, safe_dataset, safe_table, ext
         )
     }
 }

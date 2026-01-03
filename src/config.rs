@@ -383,6 +383,21 @@ impl AppConfig {
         }
     }
 
+    /// Returns the base output directory for a specific table.
+    pub fn get_table_output_dir(&self, schema: &str, table: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(&self.export.output_dir).join(schema).join(table)
+    }
+
+    /// Returns the configuration directory for a specific table.
+    pub fn get_table_config_dir(&self, schema: &str, table: &str) -> std::path::PathBuf {
+        self.get_table_output_dir(schema, table).join("config")
+    }
+
+    /// Returns the data directory for a specific table.
+    pub fn get_table_data_dir(&self, schema: &str, table: &str) -> std::path::PathBuf {
+        self.get_table_output_dir(schema, table).join("data")
+    }
+
     pub fn is_excluded(&self, table_name: &str) -> bool {
         if let Some(excluded) = &self.export.exclude_tables {
             let up = table_name.to_uppercase();
