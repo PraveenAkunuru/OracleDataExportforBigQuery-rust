@@ -39,7 +39,7 @@ A high-performance, single-binary utility for migrating large-scale Oracle datab
     ```
 
 3.  **Using a Config File (Recommended)**:
-    Create a `config.yaml` (see `config.example.yaml` for a template):
+    Create a `config.yaml` (see `config/config.example.yaml` for a template):
     ```yaml
     database:
       username: "SYSTEM"
@@ -55,7 +55,7 @@ A high-performance, single-binary utility for migrating large-scale Oracle datab
     ```
     Execute:
     ```bash
-    ./target/release/oracle_rust_exporter --config config.yaml
+    ./target/release/oracle_rust_exporter --config config/config.yaml
     ```
 
 ---
