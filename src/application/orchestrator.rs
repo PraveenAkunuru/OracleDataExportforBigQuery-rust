@@ -453,7 +453,7 @@ mod tests {
                 connection_string: None,
             },
             export: crate::config::ExportConfig {
-                output_dir: out_dir.clone(),
+                output_dir: out_dir.clone(), query_where: None,
                 schema: Some("TEST".to_string()),
                 table: None,
                 parallel: Some(2),
@@ -550,7 +550,7 @@ mod tests {
                 connection_string: None,
             },
             export: crate::config::ExportConfig {
-                output_dir: out_dir.clone(),
+                output_dir: out_dir.clone(), query_where: None,
                 schema: Some("TEST".to_string()),
                 table: None,
                 parallel: Some(1),
@@ -602,7 +602,7 @@ mod tests {
                 connection_string: None,
             },
             export: crate::config::ExportConfig {
-                output_dir: out_dir.clone(),
+                output_dir: out_dir.clone(), query_where: None,
                 schema: Some("TEST".to_string()),
                 table: None,
                 parallel: Some(2),

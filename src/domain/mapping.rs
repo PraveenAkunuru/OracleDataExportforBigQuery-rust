@@ -41,92 +41,14 @@ pub struct MappingEntry {
 /// It takes an `OracleType` (provided by the Oracle driver) and an optional
 /// `raw_type` (the string name of the type from Oracle metadata).
 pub fn get_mapping(oracle_type: &OracleType, raw_type: Option<&str>) -> MappingEntry {
-    // --- SPECIAL TYPES ---
-    // Oracle often stores XML, JSON, or Geometry data in CLOB/BLOB columns.
-    // We check the "raw name" from metadata to identify these special cases.
-    if let Some(r) = raw_type {
-        let upper = r.to_uppercase();
-        // XML and Spatial data go into BigQuery as plain STRINGs.
-        if upper.contains("XMLTYPE") || upper.contains("SDO_GEOMETRY") || upper.contains("UROWID") {
-            return MappingEntry {
-                bq_type: "STRING".to_string(),
-                bq_ddl_type: "STRING".to_string(),
-                arrow_type: DataType::Utf8,
-            };
-        }
-        // Native JSON support in BigQuery!
-        if upper.contains("JSON") {
-            return MappingEntry {
-                bq_type: "JSON".to_string(),
-                bq_ddl_type: "JSON".to_string(),
-                arrow_type: DataType::Utf8,
-            };
-        }
-        // Oracle 23c introduced native BOOLEAN.
-        if upper.contains("BOOLEAN") {
-            return MappingEntry {
-                bq_type: "BOOL".to_string(),
-                bq_ddl_type: "BOOL".to_string(),
-                arrow_type: DataType::Boolean,
-            };
-        }
+    // 1. Check for special types (XML, JSON, Geometry) based on raw string.
+    if let Some(entry) = map_special_type(raw_type) {
+        return entry;
     }
 
-    // --- STANDARD TYPES ---
+    // 2. Map standard Oracle types.
     match oracle_type {
-        // Oracle NUMBER is tricky because it can be an integer, a decimal, or a float.
-        OracleType::Number(prec, scale) => {
-            let (bq, ddl, arrow) = if *scale == -127 {
-                // scale -127 means it's a FLOAT in Oracle.
-                if *prec == 0 {
-                    (
-                        "STRING".to_string(),
-                        "STRING".to_string(),
-                        DataType::Utf8,
-                    )
-                } else {
-                    (
-                        "FLOAT64".to_string(),
-                        "FLOAT64".to_string(),
-                        DataType::Float64,
-                    )
-                }
-            } else if *scale == 0 {
-                // scale 0 means it's an INTEGER.
-                if *prec > 0 && *prec <= 18 {
-                    // Fits in a standard 64-bit integer.
-                    ("INT64".to_string(), "INT64".to_string(), DataType::Int64)
-                } else {
-                    // Too big for INT64, use BIGNUMERIC (Decimal128).
-                    (
-                        "BIGNUMERIC".to_string(),
-                        "BIGNUMERIC".to_string(),
-                        DataType::Decimal128(*prec, 0),
-                    )
-                }
-            } else {
-                // It's a DECIMAL (e.g., NUMBER(10,2)).
-                let p = *prec;
-                let s = *scale;
-                let ddl_str = if (s > 0 && s <= 9) && (p > 0 && p <= 38) {
-                    format!("NUMERIC({}, {})", p, s)
-                } else {
-                    format!("BIGNUMERIC({}, {})", p, s)
-                };
-                let arrow_t = if (1..=38).contains(&p) && (0..=38).contains(&s) {
-                    DataType::Decimal128(p, s)
-                } else {
-                    // Arrow Decimal has some limits, so we fallback to String for extreme cases.
-                    DataType::Utf8
-                };
-                ("BIGNUMERIC".to_string(), ddl_str, arrow_t)
-            };
-            MappingEntry {
-                bq_type: bq,
-                bq_ddl_type: ddl,
-                arrow_type: arrow,
-            }
-        }
+        OracleType::Number(prec, scale) => map_number_type(prec, scale),
 
         // Floating point numbers.
         OracleType::Float(_) | OracleType::BinaryFloat | OracleType::BinaryDouble => MappingEntry {
@@ -166,20 +88,103 @@ pub fn get_mapping(oracle_type: &OracleType, raw_type: Option<&str>) -> MappingE
             ),
         },
 
-        // Binary Data (Images, PDFs, etc).
-        // We export these as Base64 encoded strings in CSV, or raw Bytes in Parquet.
+        // Binary Data.
         OracleType::Raw(_) | OracleType::BLOB | OracleType::BFILE => MappingEntry {
             bq_type: "BYTES".to_string(),
             bq_ddl_type: "BYTES".to_string(),
             arrow_type: DataType::Binary,
         },
 
-        // Default fallback: treat as String.
+        // Default fallback.
         _ => MappingEntry {
             bq_type: "STRING".to_string(),
             bq_ddl_type: "STRING".to_string(),
             arrow_type: DataType::Utf8,
         },
+    }
+}
+
+/// Handle special types detected via raw string (e.g., XMLTYPE, JSON).
+fn map_special_type(raw_type: Option<&str>) -> Option<MappingEntry> {
+    if let Some(r) = raw_type {
+        let upper = r.to_uppercase();
+        if upper.contains("XMLTYPE") || upper.contains("SDO_GEOMETRY") || upper.contains("UROWID") {
+            return Some(MappingEntry {
+                bq_type: "STRING".to_string(),
+                bq_ddl_type: "STRING".to_string(),
+                arrow_type: DataType::Utf8,
+            });
+        }
+        if upper.contains("JSON") {
+            return Some(MappingEntry {
+                bq_type: "JSON".to_string(),
+                bq_ddl_type: "JSON".to_string(),
+                arrow_type: DataType::Utf8,
+            });
+        }
+        if upper.contains("BOOLEAN") {
+            return Some(MappingEntry {
+                bq_type: "BOOL".to_string(),
+                bq_ddl_type: "BOOL".to_string(),
+                arrow_type: DataType::Boolean,
+            });
+        }
+    }
+    None
+}
+
+/// Handle complex NUMBER logic.
+fn map_number_type(prec: &u8, scale: &i8) -> MappingEntry {
+    let (bq, ddl, arrow) = if *scale == -127 {
+        // scale -127 means it's a FLOAT (or undefined precision) in Oracle.
+        if *prec == 0 {
+            // Undefined precision: Map to STRING to ensure safety (avoid BIGNUMERIC mismatches).
+            (
+                "STRING".to_string(),
+                "STRING".to_string(),
+                DataType::Utf8,
+            )
+        } else {
+            (
+                "FLOAT64".to_string(),
+                "FLOAT64".to_string(),
+                DataType::Float64,
+            )
+        }
+    } else if *scale == 0 {
+        // scale 0 means it's an INTEGER.
+        if *prec > 0 && *prec <= 18 {
+            // Fits in a standard 64-bit integer.
+            ("INT64".to_string(), "INT64".to_string(), DataType::Int64)
+        } else {
+            // Too big for INT64, use BIGNUMERIC (Decimal128).
+            (
+                "BIGNUMERIC".to_string(),
+                "BIGNUMERIC".to_string(),
+                DataType::Decimal128(*prec, 0),
+            )
+        }
+    } else {
+        // It's a DECIMAL (e.g., NUMBER(10,2)).
+        let p = *prec;
+        let s = *scale;
+        let ddl_str = if (s > 0 && s <= 9) && (p > 0 && p <= 38) {
+            format!("NUMERIC({}, {})", p, s)
+        } else {
+            format!("BIGNUMERIC({}, {})", p, s)
+        };
+        let arrow_t = if (1..=38).contains(&p) && (0..=38).contains(&s) {
+            DataType::Decimal128(p, s)
+        } else {
+            // Fallback to String for extreme cases.
+            DataType::Utf8
+        };
+        ("BIGNUMERIC".to_string(), ddl_str, arrow_t)
+    };
+    MappingEntry {
+        bq_type: bq,
+        bq_ddl_type: ddl,
+        arrow_type: arrow,
     }
 }
 
