@@ -89,10 +89,11 @@ impl RuntimeContext {
         // The manager tells r2d2 *how* to create a new connection.
         let manager = OracleConnectionManager::new(&config.database.username, &password, &conn_str);
 
-        // We set the pool size slightly larger than the thread count.
-        // This ensures that even if all workers are busy, we have a spare
-        // connection for metadata lookups or progress tracking.
-        let pool_size = (num_threads + 2) as u32;
+        // We set the pool size significantly larger than the thread count.
+        // This ensures that even if all execution threads are busy, we have spare
+        // connections for metadata lookups or planning new chunks.
+        // Starvation Prevention: Planning tasks (metadata) must never be blocked by execution tasks.
+        let pool_size = std::cmp::max(num_threads + 10, num_threads * 2) as u32;
 
         let pool = Pool::builder()
             .max_size(pool_size)

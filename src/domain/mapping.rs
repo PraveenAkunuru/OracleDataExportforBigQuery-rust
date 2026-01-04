@@ -154,10 +154,12 @@ fn map_number_type(prec: &u8, scale: &i8) -> MappingEntry {
             ("INT64".to_string(), "INT64".to_string(), DataType::Int64)
         } else {
             // Too big for INT64, use BIGNUMERIC (Decimal128).
+            // If precision is 0, it means "unspecified" (likely 38).
+            let p = if *prec == 0 { 38 } else { *prec };
             (
                 "BIGNUMERIC".to_string(),
                 "BIGNUMERIC".to_string(),
-                DataType::Decimal128(*prec, 0),
+                DataType::Decimal128(p, 0),
             )
         }
     } else {

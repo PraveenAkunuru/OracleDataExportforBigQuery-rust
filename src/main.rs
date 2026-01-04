@@ -93,7 +93,7 @@ fn main() {
     let metadata_port = Arc::new(MetadataAdapter::new(runtime.pool.clone()));
 
     // 2. Extraction Port: Handles the heavy lifting of streaming rows to disk.
-    let prefetch = config.export.prefetch_rows.unwrap_or(5000);
+    let prefetch = config.export.prefetch_rows.unwrap_or(10000);
     let delimiter_str = config
         .export
         .field_delimiter

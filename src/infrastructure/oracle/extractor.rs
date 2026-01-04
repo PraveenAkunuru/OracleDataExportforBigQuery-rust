@@ -43,6 +43,8 @@ use arrow_schema::Schema;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression as ParquetCompression;
 use parquet::file::properties::WriterProperties;
+use rust_decimal::Decimal;
+use std::str::FromStr;
 
 /// `Extractor` implements the `ExtractionPort`.
 pub struct Extractor {
@@ -489,25 +491,43 @@ impl ArrowPush for BinaryPush {
     }
 }
 
-struct Decimal128Push(Decimal128Builder);
+struct Decimal128Push {
+    builder: Decimal128Builder,
+    scale: i8,
+}
+
 impl ArrowPush for Decimal128Push {
     fn push(&mut self, row: &Row, i: usize, _ex: &Extractor) -> Result<u64> {
+        // Optimization: Fetch as String then parse with rust_decimal.
+        // This avoids the expensive `.replace` and manual parsing.
+        // ideally we would fetch Bytes, but Oracle Number -> Bytes is complex.
+        // rust_decimal::Decimal::from_str is highly optimized.
         let v: Option<String> = row
             .get(i)
             .map_err(|e| ExportError::OracleError(e.to_string()))?;
+        
         if let Some(s) = v {
-            if let Ok(val) = s.replace(".", "").parse::<i128>() {
-                self.0.append_value(val);
+            if let Ok(d) = Decimal::from_str(&s) {
+                // Rescale to target scale (this handles the "12.34" -> 1234 conversion logic)
+                // Decimal128 in Arrow is essentially (i128, precision, scale).
+                // We need to provide the i128 value that corresponds to the target scale.
+                // e.g. if Value is 12.34 and Target Scale is 2, i128 should be 1234.
+                // e.g. if Value is 12 and Target Scale is 2, i128 should be 1200.
+                let mut d_rescaled = d;
+                // We use defaults if rescaling fails (unlikely for valid numbers)
+                // Note: rust_decimal scale is u32, Arrow is i8.
+                let _ = d_rescaled.rescale(self.scale as u32);
+                self.builder.append_value(d_rescaled.mantissa());
             } else {
-                self.0.append_null();
+                self.builder.append_null();
             }
         } else {
-            self.0.append_null();
+            self.builder.append_null();
         }
         Ok(16)
     }
     fn finish(&mut self) -> ArrayRef {
-        Arc::new(self.0.finish())
+        Arc::new(self.builder.finish())
     }
 }
 
@@ -532,11 +552,12 @@ fn create_push_builder(
         Binary => Box::new(BinaryPush(BinaryBuilder::with_capacity(cap, cap * 64))),
         Decimal128(p, s) => {
             debug!("Creating Decimal128Builder(p={}, s={})", p, s);
-            Box::new(Decimal128Push(
-                Decimal128Builder::with_capacity(cap)
+            Box::new(Decimal128Push {
+                builder: Decimal128Builder::with_capacity(cap)
                     .with_precision_and_scale(*p, *s)
                     .expect("Failed to create Decimal128Builder"),
-            ))
+                scale: *s,
+            })
         }
         _ => Box::new(StringPush(
             StringBuilder::with_capacity(cap, cap * 32),

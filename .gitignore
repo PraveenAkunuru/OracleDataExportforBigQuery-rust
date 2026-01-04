@@ -31,3 +31,4 @@ schemas.txt
 export_docker_hash/
 export_docker_parquet_hash/
 export_docker_parquet/
+bench_*
