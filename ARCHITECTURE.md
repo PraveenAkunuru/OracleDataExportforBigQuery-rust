@@ -120,7 +120,7 @@ graph LR
 
 ---
 
-## 🎓 Rust Patterns for Juniors
+## 🎓 Rust Patterns
 
 Throughout the codebase, we utilize specific Rust features to ensure performance and safety:
 
