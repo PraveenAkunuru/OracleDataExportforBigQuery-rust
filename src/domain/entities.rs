@@ -189,4 +189,5 @@ pub struct ResumeMetadata {
     pub bytes: u64,
     pub duration: f64,
     pub completed_at: u64, // Unix timestamp
+    pub query_where: Option<String>,
 }

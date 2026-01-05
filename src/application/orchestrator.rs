@@ -390,18 +390,32 @@ impl Orchestrator {
                 // Potential resume candidate. Try to read metadata.
                 if let Ok(file) = std::fs::File::open(meta_path_obj) {
                     if let Ok(resume_meta) = serde_json::from_reader::<_, crate::domain::entities::ResumeMetadata>(file) {
-                        info!(
-                            "Skipping task {}.{} (chunk {:?}) - Already completed ({} rows)",
-                            task.schema, task.table, task.chunk_id, resume_meta.rows
-                        );
-                        return TaskResult::success(
-                            task.schema,
-                            task.table,
-                            resume_meta.rows,
-                            resume_meta.bytes,
-                            resume_meta.duration,
-                            task.chunk_id,
-                        );
+                        // Validate query_where to ensure chunk definition hasn't changed.
+                        let meta_query = resume_meta.query_where.as_deref().unwrap_or("");
+                        let task_query = task.query_where.as_deref().unwrap_or("");
+                        
+                        // We use a lenient check for now: 
+                        // If meta has NO query_where (legacy sidecar), we might choose to skip or re-run.
+                        // Given we just added this, let's treat mismatch as "Re-run".
+                        if meta_query == task_query {
+                            info!(
+                                "Skipping task {}.{} (chunk {:?}) - Already completed ({} rows)",
+                                task.schema, task.table, task.chunk_id, resume_meta.rows
+                            );
+                            return TaskResult::success(
+                                task.schema,
+                                task.table,
+                                resume_meta.rows,
+                                resume_meta.bytes,
+                                resume_meta.duration,
+                                task.chunk_id,
+                            );
+                        } else {
+                            log::warn!(
+                                "Task definition changed for {}.{} (Chunk {:?}). \nOld: '{}'\nNew: '{}'\nRe-running.",
+                                task.schema, task.table, task.chunk_id, meta_query, task_query
+                            );
+                        }
                     } else {
                         log::warn!("Found corrupted metadata at {}. Cleaning up to restart.", meta_path);
                     }

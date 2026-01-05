@@ -407,6 +407,7 @@ impl ExtractionPort for Extractor {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            query_where: task.query_where.clone(),
         };
         let meta_path = format!("{}.meta", task.output_file);
         if let Ok(f) = std::fs::File::create(&meta_path) {
