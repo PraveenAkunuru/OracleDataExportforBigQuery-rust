@@ -7,7 +7,7 @@ A high-performance, single-binary utility for migrating large-scale Oracle datab
 
 ## 🌟 Key Features
 
-*   **⚡ Blazing Fast Extraction**: Multi-threaded streaming from Oracle direct to Gzip-compressed CSV or Apache Parquet.
+*   **⚡ Efficient and Fast Extraction**: Multi-threaded streaming from Oracle direct to Gzip-compressed CSV or Apache Parquet. Because we are streaming direct to the files, memory usage will be relatively low. 
 *   **📦 Native Parquet Integration**: High-performance Oracle-to-Parquet export via native **Apache Arrow** builders.
 *   **🏊 Connection Pooling**: Integrated `r2d2` pooling for stable, high-throughput parallel sessions.
 *   **🧩 Intelligent Parallel Chunking**: Automatically splits large tables (>1GB) into parallel chunks using `ROWID` ranges.
