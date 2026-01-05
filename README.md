@@ -16,10 +16,12 @@ A high-performance, single-binary utility for migrating large-scale Oracle datab
 *   **🛡️ Resilient Data Discovery**: Multi-layered fallback for table size discovery and `DATA_DEFAULT` truncation protection.
 *   **📊 Comprehensive Reporting**: Generates detailed JSON reports with MB/s, row counts, and data point validation.
 
-## 📈 Performance (Oracle 23c Free on Docker with 2 vCPUs and 4GB RAM)
+## 📈 Performance (Oracle 19c/23c on Docker Container - 2 vCPUs / 4GB RAM)
 
-*   **CSV (Gzip)**: **18.8 MB/s** (~63,000 rows/s)
-*   **Parquet**: **17.0 MB/s** (~26,000 rows/s)
+*   **CSV (Gzip)**: **~12.4 MB/s** (~41,500 rows/s)
+*   **Parquet**: **~11.0 MB/s** (~36,700 rows/s)
+
+> **Note**: Performance is typically bottlenecked by the Docker Container's IO/Network limits in this environment. The exporter is capable of higher throughput on bare metal.
 
 ---
 

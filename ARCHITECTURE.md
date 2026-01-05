@@ -135,8 +135,8 @@ Throughout the codebase, we utilize specific Rust features to ensure performance
 
 | Format | Throughput (MB/s) | Throughput (Rows/s) | Notes |
 | :--- | :--- | :--- | :--- |
-| **CSV (Gzip)** | **18.8 MB/s** | **63,000** | Faster rows/s due to simpler formatting |
-| **Parquet** | **17.0 MB/s** | **26,000** | Slower rows/s but results in binary files |
+| **CSV (Gzip)** | **~12.39 MB/s** | **~41,500** | Optimized with 10k Prefetch & Native Pooling |
+| **Parquet** | **~10.96 MB/s** | **~36,700** | Native Arrow Types (Zero-Alloc Fetch) |
 
 ---
 
