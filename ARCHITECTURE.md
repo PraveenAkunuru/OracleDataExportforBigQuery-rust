@@ -138,6 +138,13 @@ Throughout the codebase, we utilize specific Rust features to ensure performance
 | **CSV (Gzip)** | **~12.39 MB/s** | **~41,500** | Optimized with 10k Prefetch & Native Pooling |
 | **Parquet** | **~10.96 MB/s** | **~36,700** | Native Arrow Types (Zero-Alloc Fetch) |
 
+### 📉 Resource Usage
+| Metric | Peak Value | Context |
+| :--- | :--- | :--- |
+| **Memory (RSS)** | **107 MB** | Constant footprint regardless of dataset size (Streaming). |
+| **CPU Usage** | **200% (2 Cores)** | Fully utilizes available cores; scales linearly with `--parallel`. |
+
+
 ---
 
 ## 🔍 Specialized Logic

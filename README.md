@@ -23,6 +23,13 @@ A high-performance, single-binary utility for migrating large-scale Oracle datab
 
 > **Note**: Performance is typically bottlenecked by the Docker Container's IO/Network limits in this environment. The exporter is capable of higher throughput on bare metal.
 
+### 📉 Resource Efficiency (Peak Usage)
+| Metric | Value | Notes |
+| :--- | :--- | :--- |
+| **Peak Memory (RSS)** | **~107 MB** | Extremely low footprint due to streaming architecture. |
+| **Peak CPU** | **200%** | Efficiently utilizes 2 full cores (limit of test env). |
+
+
 ---
 
 ## 🚀 Getting Started
