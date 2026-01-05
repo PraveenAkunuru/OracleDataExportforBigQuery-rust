@@ -379,6 +379,44 @@ impl Orchestrator {
 
     /// Executes a single export task.
     fn execute_task(&self, task: ExportTask, metadata: &TableMetadata) -> TaskResult {
+        // --- RESUME CAPABILITY ---
+        // Check if the task is already completed by looking for the sidecar .meta file.
+        let meta_path = format!("{}.meta", task.output_file);
+        let data_path = std::path::Path::new(&task.output_file);
+        let meta_path_obj = std::path::Path::new(&meta_path);
+
+        if data_path.exists() {
+            if meta_path_obj.exists() {
+                // Potential resume candidate. Try to read metadata.
+                if let Ok(file) = std::fs::File::open(meta_path_obj) {
+                    if let Ok(resume_meta) = serde_json::from_reader::<_, crate::domain::entities::ResumeMetadata>(file) {
+                        info!(
+                            "Skipping task {}.{} (chunk {:?}) - Already completed ({} rows)",
+                            task.schema, task.table, task.chunk_id, resume_meta.rows
+                        );
+                        return TaskResult::success(
+                            task.schema,
+                            task.table,
+                            resume_meta.rows,
+                            resume_meta.bytes,
+                            resume_meta.duration,
+                            task.chunk_id,
+                        );
+                    } else {
+                        log::warn!("Found corrupted metadata at {}. Cleaning up to restart.", meta_path);
+                    }
+                }
+            } else {
+                // Data exists but no metadata -> Incomplete/Crashed run.
+                // We must clean up the partial data file.
+                log::warn!("Found partial data file at {}. Cleaning up to restart.", task.output_file);
+            }
+
+            // Cleanup logic (if we didn't return above)
+            let _ = std::fs::remove_file(data_path);
+            let _ = std::fs::remove_file(meta_path_obj); // just in case
+        }
+
         debug!("Starting chunk {:?}", task.chunk_id);
         self.extraction_port
             .export_task(task.clone(), metadata)

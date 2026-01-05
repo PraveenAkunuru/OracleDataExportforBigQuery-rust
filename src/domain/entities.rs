@@ -181,3 +181,12 @@ pub struct ValidationStats {
     pub pk_hash: Option<String>,
     pub aggregates: Option<Vec<ColumnAggregate>>,
 }
+
+/// `ResumeMetadata` is the sidecar file content used to track task completion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeMetadata {
+    pub rows: u64,
+    pub bytes: u64,
+    pub duration: f64,
+    pub completed_at: u64, // Unix timestamp
+}

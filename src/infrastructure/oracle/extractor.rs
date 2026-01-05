@@ -393,13 +393,38 @@ impl ExtractionPort for Extractor {
 
         // 6. Finalize and report.
         let (count, bytes) = writer.finish()?;
+        let duration = start_time.elapsed().as_secs_f64();
         debug!("Writer finished (rows={}, bytes={})", count, bytes);
+
+        // --- RESUME CAPABILITY ---
+        // Write a sidecar .meta file to mark this task as complete.
+        // We do this AFTER the writer is finished and closed (atomic-ish).
+        let meta = crate::domain::entities::ResumeMetadata {
+            rows: count,
+            bytes,
+            duration,
+            completed_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        let meta_path = format!("{}.meta", task.output_file);
+        if let Ok(f) = std::fs::File::create(&meta_path) {
+            if let Err(e) = serde_json::to_writer(f, &meta) {
+                // If we can't write metadata, we log a warning but don't fail the task.
+                // The task data is safe. Next run might just re-do it if we rely on metadata for skipping.
+                log::warn!("Failed to write metadata sidecar at {}: {}", meta_path, e);
+            }
+        } else {
+             log::warn!("Failed to create metadata sidecar at {}", meta_path);
+        }
+
         Ok(TaskResult::success(
             task.schema,
             task.table,
             count,
             bytes,
-            start_time.elapsed().as_secs_f64(),
+            duration,
             task.chunk_id,
         ))
     }
