@@ -24,10 +24,15 @@ A high-performance, single-binary utility for migrating large-scale Oracle datab
 > **Note**: Performance is typically bottlenecked by the Docker Container's IO/Network limits in this environment. The exporter is capable of higher throughput on bare metal.
 
 ### 📉 Resource Efficiency (Peak Usage)
-| Metric | Value | Notes |
-| :--- | :--- | :--- |
-| **Peak Memory (RSS)** | **~107 MB** | Extremely low footprint due to streaming architecture. |
-| **Peak CPU** | **200%** | Efficiently utilizes 2 full cores (limit of test env). |
+
+The application moves bottlenecks away from the client.
+
+| Scenario | App Server (Host) CPU | App Server Memory (RSS) | DB Server (Oracle Docker) CPU | DB Server Memory |
+| :--- | :--- | :--- | :--- | :--- |
+| **CSV** | **400%** (4 Cores) | **108 MB** | **321%** | **2.29 GB** |
+| **Parquet** | **44%** (Idle/Efficient) | **1.46 GB** (Buffering) | **341%** | **2.29 GB** |
+
+> **Insight**: Parquet export is **Database Bound** (waiting for Oracle), with minimal App CPU usage due to zero-allocation native fetching. The higher memory usage is due to Parquet row-group buffering. CSV export is **Compute Bound** on the App side due to string formatting, but uses minimal memory.
 
 
 ---

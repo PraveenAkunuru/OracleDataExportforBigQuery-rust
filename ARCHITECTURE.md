@@ -138,11 +138,15 @@ Throughout the codebase, we utilize specific Rust features to ensure performance
 | **CSV (Gzip)** | **~12.39 MB/s** | **~41,500** | Optimized with 10k Prefetch & Native Pooling |
 | **Parquet** | **~10.96 MB/s** | **~36,700** | Native Arrow Types (Zero-Alloc Fetch) |
 
-### 📉 Resource Usage
-| Metric | Peak Value | Context |
-| :--- | :--- | :--- |
-| **Memory (RSS)** | **107 MB** | Constant footprint regardless of dataset size (Streaming). |
-| **CPU Usage** | **200% (2 Cores)** | Fully utilizes available cores; scales linearly with `--parallel`. |
+### 📉 Resource Usage & Analysis
+
+| Metric | CSV (App Side) | Parquet (App Side) | Database Impact (Oracle) |
+| :--- | :--- | :--- | :--- |
+| **Peak CPU** | **400%** (Formatting Bound) | **44%** (IO Bound / Efficient) | **~340%** (Full Load) |
+| **Peak Memory** | **108 MB** (Streaming) | **1.46 GB** (Row Group Buffer) | **~2.3 GB** |
+
+- **CSV Optimization**: Low memory footprint, but high CPU cost for string conversion.
+- **Parquet Optimization**: Extremely low CPU cost (Native Types), but requires memory for buffering row groups before flush.
 
 
 ---
