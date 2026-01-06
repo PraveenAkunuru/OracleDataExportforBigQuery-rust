@@ -8,10 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  DB_USER: "ci_user"
-  DB_PASS: "ci_pass"
-  DB_SYSTEM_USER: "ci_system"
-  DB_SYSTEM_PASS: "ci_system_pass"
 
 jobs:
   build:
@@ -19,11 +15,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
-
-    - name: Install System Dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y libaio1
 
     - name: Set up Rust
       uses: actions-rs/toolchain@v1
