@@ -110,8 +110,6 @@ impl Orchestrator {
         }
 
         // --- STEP 3: PLANNING (Metadata & Artifacts) ---
-        // We fetch metadata and prepare artifacts in parallel.
-        // This is lightweight compared to data extraction.
         info!("Planning export for {} tables...", eligible_tables.len());
         let (plans, mut failures): (Vec<_>, Vec<_>) = eligible_tables
             .into_par_iter()
@@ -122,23 +120,24 @@ impl Orchestrator {
             });
 
         // --- STEP 4: FLATTENING ---
-        // We flatten the tasks into a single list.
-        // Each task needs a reference to its table's metadata.
         let mut flat_tasks = Vec::new();
         let mut table_meta_map = std::collections::HashMap::new();
+        let mut validation_map = std::collections::HashMap::new();
+        let mut skipped_tables = std::collections::HashSet::new();
 
-        for (metadata, tasks) in plans {
+        for (metadata, tasks, validation) in plans {
+            let key = format!("{}.{}", metadata.schema, metadata.table_name);
             let meta_arc = Arc::new(metadata);
-            // Key by schema.table to retrieve metadata during aggregation if needed,
-            // or just bind it to the task processing.
-            // Actually, we can pass the Arc<Metadata> to the execution closure.
-            table_meta_map.insert(
-                format!("{}.{}", meta_arc.schema, meta_arc.table_name),
-                meta_arc.clone(),
-            );
-
-            for task in tasks {
-                flat_tasks.push((task, meta_arc.clone()));
+            
+            table_meta_map.insert(key.clone(), meta_arc.clone());
+            
+            if tasks.is_empty() {
+                skipped_tables.insert(key);
+            } else {
+                validation_map.insert(key, validation);
+                for task in tasks {
+                    flat_tasks.push((task, meta_arc.clone()));
+                }
             }
         }
 
@@ -150,11 +149,9 @@ impl Orchestrator {
             .collect();
 
         // --- STEP 6: AGGREGATION ---
-        // Group results by table and aggregate.
         let mut results_by_table: std::collections::HashMap<String, Vec<TaskResult>> =
             std::collections::HashMap::new();
 
-        // Initialize with empty lists for all successful plans ensuring every table gets a result
         for key in table_meta_map.keys() {
             results_by_table.entry(key.clone()).or_default();
         }
@@ -169,7 +166,31 @@ impl Orchestrator {
 
         for (key, chunk_results) in results_by_table {
             if let Some((schema, table)) = key.split_once('.') {
-                final_results.push(self.aggregate_results(schema, table, chunk_results));
+                let agg_result = self.aggregate_results(schema, table, chunk_results);
+                
+                // --- STEP 6.5: POST-SUCCESS ARTIFACTS (Metadata) ---
+                if agg_result.status == "SUCCESS" && !skipped_tables.contains(&key) {
+                    if let Some(meta) = table_meta_map.get(&key) {
+                        let config_dir = self.config.get_table_config_dir(&meta.schema, &meta.table_name);
+                        let validation = validation_map.get(&key).and_then(|v| v.as_ref());
+                        
+                        if let Err(e) = self.artifact_port.write_metadata(
+                            meta,
+                            &config_dir.to_string_lossy(),
+                            validation,
+                        ) {
+                             log::error!("Failed to write metadata.json for {}: {:?}", key, e);
+                             // We don't fail the task, but we log strictly.
+                        }
+                    }
+                } else if skipped_tables.contains(&key) {
+                    // It was skipped. We still want to include it in final results,
+                    // but we might want to flag it as "SKIPPED".
+                    // Current aggregate_results return SUCCESS with 0 rows if empty.
+                    // We can leave it as is.
+                }
+
+                final_results.push(agg_result);
             }
         }
 
@@ -226,7 +247,7 @@ impl Orchestrator {
         &self,
         schema: &str,
         table: &str,
-    ) -> std::result::Result<(TableMetadata, Vec<ExportTask>), TaskResult> {
+    ) -> std::result::Result<(TableMetadata, Vec<ExportTask>, Option<crate::domain::entities::ValidationStats>), TaskResult> {
         info!("Planning {}.{}", schema, table);
 
         // 1. Metadata
@@ -255,6 +276,18 @@ impl Orchestrator {
                 None,
                 format!("Dir creation failed: {:?}", e),
             ));
+        }
+
+        // --- TABLE-LEVEL RESTART CHECK ---
+        // If metadata.json exists, we assume the table is FULLY DONE.
+        // We skip generating tasks.
+        let meta_json_path = std::path::Path::new(&config_dir).join("metadata.json");
+        if meta_json_path.exists() {
+            info!("Table {}.{} already completed (metadata.json exists). Skipping.", schema, table);
+            // We return empty tasks.
+            // Note: We don't have the previous run's stats unless we parse metadata.json.
+            // For now, we return empty stats. The report will show 0 rows exported *in this run*.
+            return Ok((metadata, vec![], None));
         }
 
         let enable_row_hash = self.config.export.enable_row_hash.unwrap_or(false);
@@ -300,13 +333,12 @@ impl Orchestrator {
             }
         }
 
-        // 4. Artifacts
-        if let Err(e) = self.artifact_port.write_artifacts(
+        // 4. Artifacts (Setup only)
+        if let Err(e) = self.artifact_port.prepare_artifacts(
             &metadata,
             &config_dir.to_string_lossy(),
             enable_row_hash,
             file_format,
-            validation_stats.as_ref(),
         ) {
             return Err(TaskResult::failure(
                 schema.to_string(),
@@ -374,62 +406,26 @@ impl Orchestrator {
                 .collect()
         };
 
-        Ok((metadata, tasks))
+        Ok((metadata, tasks, validation_stats))
     }
 
     /// Executes a single export task.
     fn execute_task(&self, task: ExportTask, metadata: &TableMetadata) -> TaskResult {
         // --- RESUME CAPABILITY ---
-        // Check if the task is already completed by looking for the sidecar .meta file.
-        let meta_path = format!("{}.meta", task.output_file);
+        // We now rely on Table-Level checking (metadata.json).
+        // However, if we are here, it means we decided to run the task.
+        // We should ensure we start clean.
         let data_path = std::path::Path::new(&task.output_file);
-        let meta_path_obj = std::path::Path::new(&meta_path);
-
         if data_path.exists() {
-            if meta_path_obj.exists() {
-                // Potential resume candidate. Try to read metadata.
-                if let Ok(file) = std::fs::File::open(meta_path_obj) {
-                    if let Ok(resume_meta) = serde_json::from_reader::<_, crate::domain::entities::ResumeMetadata>(file) {
-                        // Validate query_where to ensure chunk definition hasn't changed.
-                        let meta_query = resume_meta.query_where.as_deref().unwrap_or("");
-                        let task_query = task.query_where.as_deref().unwrap_or("");
-                        
-                        // We use a lenient check for now: 
-                        // If meta has NO query_where (legacy sidecar), we might choose to skip or re-run.
-                        // Given we just added this, let's treat mismatch as "Re-run".
-                        if meta_query == task_query {
-                            info!(
-                                "Skipping task {}.{} (chunk {:?}) - Already completed ({} rows)",
-                                task.schema, task.table, task.chunk_id, resume_meta.rows
-                            );
-                            return TaskResult::success(
-                                task.schema,
-                                task.table,
-                                resume_meta.rows,
-                                resume_meta.bytes,
-                                resume_meta.duration,
-                                task.chunk_id,
-                            );
-                        } else {
-                            log::warn!(
-                                "Task definition changed for {}.{} (Chunk {:?}). \nOld: '{}'\nNew: '{}'\nRe-running.",
-                                task.schema, task.table, task.chunk_id, meta_query, task_query
-                            );
-                        }
-                    } else {
-                        log::warn!("Found corrupted metadata at {}. Cleaning up to restart.", meta_path);
-                    }
-                }
-            } else {
-                // Data exists but no metadata -> Incomplete/Crashed run.
-                // We must clean up the partial data file.
-                log::warn!("Found partial data file at {}. Cleaning up to restart.", task.output_file);
-            }
-
-            // Cleanup logic (if we didn't return above)
-            let _ = std::fs::remove_file(data_path);
-            let _ = std::fs::remove_file(meta_path_obj); // just in case
+             // Since we don't have chunk-level skipping anymore,
+             // existence of data file means it's a leftover from a failed run (since metadata.json check didn't trigger).
+             // We should delete it.
+             let _ = std::fs::remove_file(data_path);
         }
+        
+        // Also remove legacy .meta files if they exist
+        let meta_path = format!("{}.meta", task.output_file);
+        let _ = std::fs::remove_file(meta_path);
 
         debug!("Starting chunk {:?}", task.chunk_id);
         self.extraction_port
@@ -564,12 +560,19 @@ mod tests {
 
     struct MockArtifactPort;
     impl ArtifactPort for MockArtifactPort {
-        fn write_artifacts(
+        fn prepare_artifacts(
             &self,
             metadata: &TableMetadata,
             _output_config_dir: &str,
             _enable_row_hash: bool,
             _file_format: FileFormat,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn write_metadata(
+            &self,
+            metadata: &TableMetadata,
+            _output_config_dir: &str,
             _validation_stats: Option<&crate::domain::entities::ValidationStats>,
         ) -> Result<()> {
             Ok(())

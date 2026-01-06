@@ -24,13 +24,20 @@ use crate::domain::errors::Result;
 
 /// `ArtifactPort` handles the generation of BigQuery DDL, load scripts, and JSON schemas.
 pub trait ArtifactPort: Send + Sync {
-    /// Writes various configuration and setup files to the specified directory.
-    fn write_artifacts(
+    /// Writes configuration and setup files (DDL, Schema, Load Scripts) but NOT the success marker.
+    fn prepare_artifacts(
         &self,
         metadata: &TableMetadata,
         output_config_dir: &str,
         enable_row_hash: bool,
         file_format: FileFormat,
+    ) -> Result<()>;
+
+    /// Writes the metadata.json file, marking the export as complete.
+    fn write_metadata(
+        &self,
+        metadata: &TableMetadata,
+        output_config_dir: &str,
         validation_stats: Option<&crate::domain::entities::ValidationStats>,
     ) -> Result<()>;
 }
