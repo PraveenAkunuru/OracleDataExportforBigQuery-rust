@@ -26,7 +26,16 @@ cd "$PROJECT_ROOT"
 
 echo "===================================================="
 echo "      Oracle Data Exporter - Test Suite             "
+echo "      Oracle Data Exporter - Test Suite             "
 echo "===================================================="
+
+# Load .env if it exists
+if [ -f "$PROJECT_ROOT/.env" ]; then
+    echo "Loading environment from .env..."
+    set -a
+    source "$PROJECT_ROOT/.env"
+    set +a
+fi
 
 # Set up Oracle Incident Client paths
 export LD_LIBRARY_PATH="$PROJECT_ROOT/lib/instantclient_19_10:$PROJECT_ROOT/lib:${LD_LIBRARY_PATH:-}"

@@ -20,6 +20,13 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
+# Load .env if it exists
+if [ -f "$PROJECT_ROOT/.env" ]; then
+    set -a
+    source "$PROJECT_ROOT/.env"
+    set +a
+fi
+
 # Detect Library Paths
 LIB_DIR="$PROJECT_ROOT/lib"
 INSTANT_CLIENT="$LIB_DIR/instantclient_19_10"

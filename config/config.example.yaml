@@ -13,8 +13,9 @@
 # limitations under the License.
 
 database:
-  username: "HR"
-  password: "password"
+  # Environment variables (recommended for secrets) are fully supported:
+  username: ${DB_USER}       # e.g. HR
+  password: ${DB_PASS}       # e.g. password
   host: "db-server"
   port: 1521
   service: "ORCLPDB"

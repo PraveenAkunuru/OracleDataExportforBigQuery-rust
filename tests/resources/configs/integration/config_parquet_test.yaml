@@ -13,8 +13,8 @@
 # limitations under the License.
 
 database:
-  username: "TESTUSER"
-  password: "testpassword"
+  username: ${DB_USER}
+  password: ${DB_PASS}
   host: "localhost"
   port: 1521
   service: "FREEPDB1"
