@@ -60,25 +60,22 @@ impl ArtifactAdapter {
 }
 
 impl ArtifactPort for ArtifactAdapter {
-    /// Generates and writes all sidecar files.
-    fn write_artifacts(
+    /// Generates and writes setup files (DDL, Schema, Load Scripts).
+    fn prepare_artifacts(
         &self,
         metadata: &TableMetadata,
         output_config_dir: &str,
         enable_row_hash: bool,
         file_format: FileFormat,
-        validation_stats: Option<&crate::domain::entities::ValidationStats>,
     ) -> Result<()> {
         let config_path = Path::new(output_config_dir);
 
         // --- 1. BIGQUERY DDL ---
-        // We create a "Physical" table to hold raw data and a "Logical" view for users.
         let bq_ddl = self.generate_bq_ddl(metadata, enable_row_hash);
         self.write_file(config_path.join("bigquery.ddl"), &bq_ddl)
             .map_err(ExportError::IoError)?;
 
         // --- 2. SCHEMA JSON ---
-        // BigQuery needs a JSON map of columns and types to load raw files.
         let schema_json = self.generate_schema_json(metadata, enable_row_hash);
         self.write_file(
             config_path.join("schema.json"),
@@ -86,8 +83,32 @@ impl ArtifactPort for ArtifactAdapter {
         )
         .map_err(ExportError::IoError)?;
 
-        // --- 3. METADATA JSON ---
-        // Useful for audit logs and verification tools.
+        // --- 3. LOAD COMMAND ---
+        let load_cmd = self.generate_load_command(metadata, file_format);
+        let load_cmd_path = config_path.join("load_command.sh");
+        self.write_file(load_cmd_path.clone(), &load_cmd)
+            .map_err(ExportError::IoError)?;
+
+        // Make the script executable
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(f) = File::open(&load_cmd_path) {
+                let _ = f.set_permissions(std::fs::Permissions::from_mode(0o755));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Writes the metadata.json file, marking the export as complete.
+    fn write_metadata(
+        &self,
+        metadata: &TableMetadata,
+        output_config_dir: &str,
+        validation_stats: Option<&crate::domain::entities::ValidationStats>,
+    ) -> Result<()> {
+        let config_path = Path::new(output_config_dir);
         let meta_json = json!({
             "table_name": metadata.table_name,
             "schema_name": metadata.schema,
@@ -101,25 +122,7 @@ impl ArtifactPort for ArtifactAdapter {
             &serde_json::to_string_pretty(&meta_json)
                 .map_err(|e| ExportError::ArtifactError(e.to_string()))?,
         )
-        .map_err(ExportError::IoError)?;
-
-        // --- 4. LOAD COMMAND ---
-        // We generate the exact `bq load ...` CLI command to save the user time.
-        let load_cmd = self.generate_load_command(metadata, file_format);
-        let load_cmd_path = config_path.join("load_command.sh");
-        self.write_file(load_cmd_path.clone(), &load_cmd)
-            .map_err(ExportError::IoError)?;
-
-        // Make the script executable on Linux/Mac.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(f) = File::open(&load_cmd_path) {
-                let _ = f.set_permissions(std::fs::Permissions::from_mode(0o755));
-            }
-        }
-
-        Ok(())
+        .map_err(ExportError::IoError)
     }
 }
 

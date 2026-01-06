@@ -33,13 +33,15 @@ run_restart_test() {
     end_time=$(date +%s)
     echo "   -> Duration: $((end_time - start_time))s"
 
-    # Verify Meta Existence (Check ALL_TYPES_TEST as a sample)
-    local SAMPLE_META="$OUTPUT_DIR/$TEST_FILE$META_EXT"
+    # Verify Meta Existence (Table Level)
+    # Output Dir structure: SCHEMA/TABLE/config/metadata.json
+    local SAMPLE_META="$OUTPUT_DIR/TESTUSER/ALL_TYPES_TEST/config/metadata.json"
+    
     if [ ! -f "$SAMPLE_META" ]; then
         echo "   [ERROR] Meta file missing at $SAMPLE_META"
         exit 1
     fi
-    echo "   [PASS] Meta file created."
+    echo "   [PASS] Metadata file created."
 
     # 3. Resume Run (Should Skip)
     echo "[Step 2] Resume Run (Expecting Skip)..."
@@ -49,10 +51,10 @@ run_restart_test() {
     duration=$((end_time - start_time))
     echo "   -> Duration: ${duration}s"
 
-    if grep -q "Skipping task" "run_${FORMAT}_2.log"; then
+    if grep -q "already completed" "run_${FORMAT}_2.log"; then
         echo "   [PASS] Log confirms skipping."
     else
-        echo "   [WARNING] 'Skipping task' not found in logs. Check log level."
+        echo "   [WARNING] 'already completed' not found in logs. Check log level."
     fi
 
     if [ $duration -gt 10 ]; then
@@ -73,6 +75,10 @@ run_restart_test() {
          exit 1
     fi
 
+    # With Table-Level restart, we might NOT see "partial data" logs if we just overwrite.
+    # But current implementation deletes data if data exists but meta doesn't.
+    # Let's check if data file was recreated (timestamp changed) or just verified.
+    # Actually, we logged "Found partial data file ... Cleaning up".
     if grep -q "Found partial data file" "run_${FORMAT}_3.log"; then
         echo "   [PASS] Log confirms partial file detection/cleanup."
     else
@@ -84,20 +90,19 @@ run_restart_test() {
 }
 
 # --- CSV TEST ---
-# CSV output: bench_opt_csv/TESTUSER/ALL_TYPES_TEST/data/data.csv.gz
-# Meta: .meta appended to that
+# CSV output: bench_opt_csv
 run_restart_test "CSV" \
     "tests/resources/configs/benchmark/bench_opt_csv.yaml" \
     "bench_opt_csv" \
-    "TESTUSER/ALL_TYPES_TEST/data/data.csv.gz" \
-    ".meta"
+    "ignored_data_file" \
+    "ignored_meta_ext"
 
 # --- PARQUET TEST ---
-# Parquet output: bench_opt_parquet/TESTUSER/ALL_TYPES_TEST/data/data.parquet
+# Parquet output: bench_opt_parquet
 run_restart_test "PARQUET" \
     "tests/resources/configs/benchmark/bench_opt_parquet.yaml" \
     "bench_opt_parquet" \
-    "TESTUSER/ALL_TYPES_TEST/data/data.parquet" \
-    ".meta"
+    "ignored_data_file" \
+    "ignored_meta_ext"
 
 echo "ALL TESTS PASSED SUCCESSFULLY!"

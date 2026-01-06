@@ -159,6 +159,28 @@ Throughout the codebase, we utilize specific Rust features to ensure performance
 
 ---
 
+---
+
+## 🔄 Restartability & Resilience (Table-Level)
+
+The application implements a **Table-Level** restart strategy to ensure data consistency and eliminate redundant work:
+
+1.  **Success Marker**: `metadata.json`
+    *   Located in: `{output_dir}/{SCHEMA}/{TABLE}/config/metadata.json`
+    *   Written only upon **successful** completion of all table partitions.
+
+2.  **Orchestration Logic**:
+    *   **Check**: Before processing, the Orchestrator checks for `metadata.json`.
+    *   **Skip**: If found, the table is skipped entirely (log: "already completed").
+    *   **Clean**: If missing, any existing data files are deleted (to prevent duplicate/partial data) and the table is re-exported.
+
+3.  **Safety**:
+    *   Atomic commit via file existence.
+    *   No complex state tracking or offset management.
+    *   Guarantees that a table in the target bucket is always complete.
+
+---
+
 ## 🛠️ Maintainer Notes
 
 *   **Adding a Type**: Update `map_oracle_to_arrow` in [`mapping.rs`](src/domain/mapping.rs).

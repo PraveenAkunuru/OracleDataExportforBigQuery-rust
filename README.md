@@ -45,6 +45,15 @@ The application moves bottlenecks away from the client.
     ```bash
     cargo build --release
     ```
+    > **Note for Legacy Servers**: If running on older Linux versions (Oracle Linux 7/8), see [**BUILD.md**](BUILD.md) for compatibility instructions.
+
+## 🔄 Restartability & Resilience
+*   **Table-Level Atomicity**: The exporter treats the **Table** as the unit of work.
+*   **Success Marker**: A `metadata.json` file is written to the table's `config/` directory only after **all** data is successfully exported.
+*   **Resume Capability**: If a job is interrupted, simply re-run the same command. The Orchestrator will:
+    *   **Skip** tables that have `metadata.json` (Instant Resume).
+    *   **Clean Up** partial data for incomplete tables.
+    *   **Resume** processing of remaining tables.
 
 2.  **Run with Native Client**:
     Ensure `LD_LIBRARY_PATH` points to your Oracle Instant Client.
