@@ -182,8 +182,10 @@ pub struct CliArgs {
 impl AppConfig {
     pub fn from_file(path: &str) -> Result<Self, Box<dyn Error>> {
         let mut file = File::open(path)?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
+        let mut raw_contents = String::new();
+        file.read_to_string(&mut raw_contents)?;
+
+        let contents = Self::substitute_env_vars(&raw_contents);
 
         let config: AppConfig = if path.ends_with(".json") {
             serde_json::from_str(&contents)?
@@ -407,6 +409,22 @@ impl AppConfig {
         }
         false
     }
+
+    /// Replaces ${VAR} or $VAR in the input string with environment variable values.
+    fn substitute_env_vars(input: &str) -> String {
+        let regex = regex::Regex::new(r"\$\{?([a-zA-Z_][a-zA-Z0-9_]*)\}?").unwrap();
+        regex.replace_all(input, |caps: &regex::Captures| {
+            let var_name = &caps[1];
+            std::env::var(var_name).unwrap_or_else(|_| {
+                // If var is missing, keep original string to avoid breaking non-env usage
+                // or consider warning. For now, strict: return original.
+                // Actually, for secrets, we might want empty string, but keeping original
+                // allows default values if not meant to be env var.
+                // Let's create a special case: valid env var -> replace, else -> keep.
+                caps[0].to_string()
+            })
+        }).to_string()
+    }
 }
 
 #[cfg(test)]
@@ -505,5 +523,17 @@ export:
         assert_eq!(config.export.parallel, Some(10));
         assert_eq!(config.export.cpu_percent, Some(80));
         assert_eq!(config.export.load_to_bq, Some(true));
+    }
+
+    #[test]
+    fn test_substitute_env_vars() {
+        std::env::set_var("TEST_VAR", "replaced_value");
+        let input = "prefix_${TEST_VAR}_suffix";
+        let output = AppConfig::substitute_env_vars(input);
+        assert_eq!(output, "prefix_replaced_value_suffix");
+
+        let input_missing = "prefix_${MISSING_VAR}_suffix";
+        let output_missing = AppConfig::substitute_env_vars(input_missing);
+        assert_eq!(output_missing, "prefix_${MISSING_VAR}_suffix");
     }
 }

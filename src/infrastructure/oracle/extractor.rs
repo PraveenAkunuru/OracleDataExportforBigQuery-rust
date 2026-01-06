@@ -507,7 +507,7 @@ impl ArrowPush for Decimal128Push {
         let v: Option<String> = row
             .get(i)
             .map_err(|e| ExportError::OracleError(e.to_string()))?;
-        
+
         if let Some(s) = v {
             if let Ok(d) = Decimal::from_str(&s) {
                 // Rescale to target scale (this handles the "12.34" -> 1234 conversion logic)
@@ -518,7 +518,7 @@ impl ArrowPush for Decimal128Push {
                 let mut d_rescaled = d;
                 // We use defaults if rescaling fails (unlikely for valid numbers)
                 // Note: rust_decimal scale is u32, Arrow is i8.
-                let _ = d_rescaled.rescale(self.scale as u32);
+                d_rescaled.rescale(self.scale as u32);
                 self.builder.append_value(d_rescaled.mantissa());
             } else {
                 self.builder.append_null();

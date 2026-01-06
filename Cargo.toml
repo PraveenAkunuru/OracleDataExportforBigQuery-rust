@@ -2,6 +2,12 @@
 name = "oracle_rust_exporter"
 version = "0.2.0"
 edition = "2021"
+authors = ["Google LLC"]
+description = "High-performance Oracle to BigQuery Data Exporter"
+license = "Apache-2.0"
+repository = "https://github.com/google/oracle-to-bigquery-exporter-rust"
+keywords = ["oracle", "bigquery", "export", "etl", "rust"]
+categories = ["command-line-utilities", "database"]
 
 [dependencies]
 oracle = "0.6"

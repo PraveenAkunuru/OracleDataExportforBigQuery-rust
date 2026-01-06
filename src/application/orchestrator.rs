@@ -128,9 +128,9 @@ impl Orchestrator {
         for (metadata, tasks, validation) in plans {
             let key = format!("{}.{}", metadata.schema, metadata.table_name);
             let meta_arc = Arc::new(metadata);
-            
+
             table_meta_map.insert(key.clone(), meta_arc.clone());
-            
+
             if tasks.is_empty() {
                 skipped_tables.insert(key);
             } else {
@@ -167,20 +167,22 @@ impl Orchestrator {
         for (key, chunk_results) in results_by_table {
             if let Some((schema, table)) = key.split_once('.') {
                 let agg_result = self.aggregate_results(schema, table, chunk_results);
-                
+
                 // --- STEP 6.5: POST-SUCCESS ARTIFACTS (Metadata) ---
                 if agg_result.status == "SUCCESS" && !skipped_tables.contains(&key) {
                     if let Some(meta) = table_meta_map.get(&key) {
-                        let config_dir = self.config.get_table_config_dir(&meta.schema, &meta.table_name);
+                        let config_dir = self
+                            .config
+                            .get_table_config_dir(&meta.schema, &meta.table_name);
                         let validation = validation_map.get(&key).and_then(|v| v.as_ref());
-                        
+
                         if let Err(e) = self.artifact_port.write_metadata(
                             meta,
                             &config_dir.to_string_lossy(),
                             validation,
                         ) {
-                             log::error!("Failed to write metadata.json for {}: {:?}", key, e);
-                             // We don't fail the task, but we log strictly.
+                            log::error!("Failed to write metadata.json for {}: {:?}", key, e);
+                            // We don't fail the task, but we log strictly.
                         }
                     }
                 } else if skipped_tables.contains(&key) {
@@ -247,7 +249,14 @@ impl Orchestrator {
         &self,
         schema: &str,
         table: &str,
-    ) -> std::result::Result<(TableMetadata, Vec<ExportTask>, Option<crate::domain::entities::ValidationStats>), TaskResult> {
+    ) -> std::result::Result<
+        (
+            TableMetadata,
+            Vec<ExportTask>,
+            Option<crate::domain::entities::ValidationStats>,
+        ),
+        TaskResult,
+    > {
         info!("Planning {}.{}", schema, table);
 
         // 1. Metadata
@@ -283,7 +292,10 @@ impl Orchestrator {
         // We skip generating tasks.
         let meta_json_path = std::path::Path::new(&config_dir).join("metadata.json");
         if meta_json_path.exists() {
-            info!("Table {}.{} already completed (metadata.json exists). Skipping.", schema, table);
+            info!(
+                "Table {}.{} already completed (metadata.json exists). Skipping.",
+                schema, table
+            );
             // We return empty tasks.
             // Note: We don't have the previous run's stats unless we parse metadata.json.
             // For now, we return empty stats. The report will show 0 rows exported *in this run*.
@@ -417,12 +429,12 @@ impl Orchestrator {
         // We should ensure we start clean.
         let data_path = std::path::Path::new(&task.output_file);
         if data_path.exists() {
-             // Since we don't have chunk-level skipping anymore,
-             // existence of data file means it's a leftover from a failed run (since metadata.json check didn't trigger).
-             // We should delete it.
-             let _ = std::fs::remove_file(data_path);
+            // Since we don't have chunk-level skipping anymore,
+            // existence of data file means it's a leftover from a failed run (since metadata.json check didn't trigger).
+            // We should delete it.
+            let _ = std::fs::remove_file(data_path);
         }
-        
+
         // Also remove legacy .meta files if they exist
         let meta_path = format!("{}.meta", task.output_file);
         let _ = std::fs::remove_file(meta_path);
