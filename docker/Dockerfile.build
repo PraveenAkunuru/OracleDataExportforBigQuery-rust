@@ -1,0 +1,21 @@
+# Use Oracle Linux 8 as base (GLIBC 2.28 compatible, widely used for Oracle 19c)
+FROM oraclelinux:8
+
+# Install dependencies for building Rust & C components
+RUN dnf install -y gcc openssl-devel curl tar gzip
+
+# Install Rust (stable)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Create app directory
+WORKDIR /app
+
+# Copy source code
+COPY . .
+
+# Build release binary
+RUN cargo build --release
+
+# Output stage check
+RUN ldd target/release/oracle_rust_exporter || true

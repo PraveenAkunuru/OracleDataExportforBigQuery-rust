@@ -43,8 +43,11 @@ The application moves bottlenecks away from the client.
 
 1.  **Clone and Build**:
     ```bash
+    ```bash
     cargo build --release
     ```
+    > **Note for Legacy Servers**: If running on older Linux versions (Oracle Linux 7/8), see [**BUILD.md**](BUILD.md) for compatibility instructions.
+
 ## 🔄 Restartability & Resilience
 *   **Table-Level Atomicity**: The exporter treats the **Table** as the unit of work.
 *   **Success Marker**: A `metadata.json` file is written to the table's `config/` directory only after **all** data is successfully exported.
