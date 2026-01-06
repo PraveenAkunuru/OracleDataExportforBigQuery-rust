@@ -13,30 +13,35 @@ Rust binaries are self-contained. You should:
 
 ---
 
-## Strategy A: The "Build Container" (Recommended)
+## Strategy A: The "Portable Bundle" (Recommended)
 
-If you have Docker on your **Laptop** or **CI/CD Server**, use this method. It guarantees compatibility by compiling against the exact OS libraries used in production (Oracle Linux 8).
+Use the existing helper script `scripts/build/build_bundle.sh`. This script is extremely robust:
+1.  Uses **CentOS 7** (GLIBC 2.17) to ensure the binary runs on **ANY** Linux from the last 10 years (RHEL 7+, Oracle 7+, Ubuntu 14.04+).
+2.  **Bundles** the Oracle Instant Client libraries (so you don't need to install them on the server).
+3.  Creates a `.tar.gz` with a `run.sh` wrapper.
 
-### 1. Run the Build Script
-On your machine (NOT production), run:
-```bash
-./scripts/build_in_docker.sh
-```
-*This script launches a temporary OracleLinux container, installs the Rust compiler *inside* it, builds the project, and extracts the binary to your local folder.*
+### Steps
+1.  **Download Oracle Client ZIP**:
+    Download `instantclient-basiclite-linux.x64-19.x.zip` and place it in `scripts/build/`.
+2.  **Run Builder**:
+    ```bash
+    cd scripts/build
+    ./build_bundle.sh
+    ```
+3.  **Deploy**:
+    Copy `dist/oracle_exporter_bundle.tar.gz` to your server.
+4.  **Run**:
+    ```bash
+    tar -xzf oracle_exporter_bundle.tar.gz
+    cd dist
+    ./run.sh --help
+    ```
 
-### 2. Verified Output
-You will see a file named `oracle_rust_exporter` in your project root.
-Verify it is an executable:
-```bash
-file oracle_rust_exporter
-# Output should say: ELF 64-bit LSB shared object, x86-64 ...
-```
+---
 
-### 3. Deploy
-Upload this single file to your production server:
-```bash
-scp oracle_rust_exporter user@prod-server:/app/bin/
-```
+## Strategy B: Binary Only (If Oracle Client is already installed)
+
+If your production server already has Oracle Database or Instant Client installed, you can just build the binary.
 
 ---
 
