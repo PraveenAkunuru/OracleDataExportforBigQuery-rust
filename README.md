@@ -43,7 +43,6 @@ The application moves bottlenecks away from the client.
 
 1.  **Clone and Build**:
     ```bash
-    ```bash
     cargo build --release
     ```
     > **Note for Legacy Servers**: If running on older Linux versions (Oracle Linux 7/8), see [**BUILD.md**](BUILD.md) for compatibility instructions.
