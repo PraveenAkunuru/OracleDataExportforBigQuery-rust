@@ -1,0 +1,12 @@
+# Config with INVALID credentials (for negative testing)
+database:
+  username: ${DB_USER}       # Will use env var if set, but we usually set it in test script
+  password: "WRONG_PASSWORD" # Explicitly wrong
+  host: "127.0.0.1"          # Required by struct
+  port: 1521                 # Required by struct
+  service: "FREEPDB1"        # Required by struct
+  connection_string: "127.0.0.1:1521/FREEPDB1"
+
+export:
+  output_dir: "tests/resources/output_negative"
+  # ... other fields ignored for connection failure

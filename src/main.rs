@@ -32,17 +32,21 @@ use crate::infrastructure::artifacts::artifact_adapter::ArtifactAdapter;
 use crate::infrastructure::oracle::extractor::Extractor;
 use crate::infrastructure::oracle::metadata::MetadataAdapter;
 use clap::Parser;
-use log::{debug, error, info};
 use std::process;
 use std::sync::Arc;
+use tracing::{debug, error, info};
 
 /// The application entry point.
 ///
 /// We use `std::process::exit` to return non-zero exit codes on failure,
 /// which is important for shell scripts or CI/CD pipelines.
 fn main() {
-    // env_logger is a common Rust logger that reads the RUST_LOG environment variable.
-    env_logger::init();
+    // Initialize structured logging
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
 
     // Parse command-line arguments using the `clap` crate.
     let args = CliArgs::parse();

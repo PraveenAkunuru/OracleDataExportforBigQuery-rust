@@ -63,3 +63,13 @@ else
     echo "PASS: Exited with error"
 fi
 echo ""
+
+echo "=== Test 5: Invalid Password ==="
+# We expect this to fail gracefully (e.g. ORA-01017)
+if $BIN --config "$CONFIG_DIR/config_bad_creds.yaml"; then
+    echo "FAIL: Should have exited with error"
+    exit 1
+else
+    echo "PASS: Exited with error"
+fi
+echo ""

@@ -23,9 +23,9 @@
 use crate::config::AppConfig;
 use crate::domain::errors::{ExportError, Result};
 use crate::infrastructure::oracle::connection_manager::OracleConnectionManager;
-use log::info;
 use r2d2::Pool;
 use std::sync::Arc;
+use tracing::{info, warn};
 
 /// `RuntimeContext` holds shared resources that exist for the entire life of the app.
 pub struct RuntimeContext {
@@ -42,36 +42,6 @@ impl RuntimeContext {
     /// This function performs "Self-Tuning": it looks at your computer's CPU count
     /// and the `cpu_percent` setting to decide how many threads to start.
     pub fn init(config: &AppConfig) -> Result<Self> {
-        // --- STEP 1: PARALLELISM CALCULATION ---
-
-        // We calculate how many CPU cores to use. If the user didn't specify,
-        // we default to 50% of the available cores to avoid "freezing" the machine.
-        let cpu_percent = config.export.cpu_percent.unwrap_or(50);
-        let total_cpus = num_cpus::get();
-        let num_threads = config
-            .export
-            .parallel
-            .unwrap_or_else(|| (total_cpus as f64 * (cpu_percent as f64 / 100.0)).ceil() as usize);
-
-        // Always run at least 1 thread.
-        let num_threads = std::cmp::max(1, num_threads);
-
-        info!(
-            "Initializing worker pool with {} threads (Target CPU: {}%)",
-            num_threads, cpu_percent
-        );
-
-        // Rayon's global thread pool is used by `.into_par_iter()` throughout the app.
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .build_global()
-            .unwrap_or_else(|e| {
-                info!(
-                    "Global thread pool already initialized (likely in a test): {}",
-                    e
-                );
-            });
-
         // --- STEP 2: CONNECTION POOL SETUP ---
 
         let conn_str = config.database.get_connection_string();
@@ -89,23 +59,98 @@ impl RuntimeContext {
         // The manager tells r2d2 *how* to create a new connection.
         let manager = OracleConnectionManager::new(&config.database.username, &password, &conn_str);
 
-        // We set the pool size significantly larger than the thread count.
-        // This ensures that even if all execution threads are busy, we have spare
-        // connections for metadata lookups or planning new chunks.
-        // Starvation Prevention: Planning tasks (metadata) must never be blocked by execution tasks.
-        let pool_size = std::cmp::max(num_threads + 10, num_threads * 2) as u32;
-
+        // Initial sizing for the pool. We might resize or just set a safe upper bound.
+        // We accept that we might not know the exact thread count yet, but we can guess.
+        // A temporary max size is fine; it won't allocate all connections immediately.
         let pool = Pool::builder()
-            .max_size(pool_size)
+            .max_size(64) // Temporary safe limit, will effectively be limited by thread count usage
             .build(manager)
             .map_err(|e| {
                 ExportError::OracleError(format!("Failed to create connection pool: {}", e))
             })?;
+        let pool = Arc::new(pool);
 
-        Ok(Self {
-            // We wrap the pool in an Arc so we can clone the pointer, not the whole pool.
-            pool: Arc::new(pool),
-            num_threads,
-        })
+        // --- STEP 2: PARALLELISM CALCULATION ---
+
+        // Auto-tuning Logic:
+        // 1. If user provided `parallel` -> Use it.
+        // 2. If user provided `cpu_percent` -> Use it (Client based).
+        // 3. If NEITHER provided -> Query DB for `cpu_count` and use 80% of that (Server based).
+
+        let num_threads = if let Some(p) = config.export.parallel {
+            info!("Using explicit parallelism: {} threads", p);
+            p
+        } else if let Some(pct) = config.export.cpu_percent {
+            // Client-side scaling
+            let total_cpus = num_cpus::get();
+            let p = (total_cpus as f64 * (pct as f64 / 100.0)).ceil() as usize;
+            info!(
+                "Using client-side CPU scaling: {}% of {} cores = {} threads",
+                pct, total_cpus, p
+            );
+            p
+        } else {
+            // Server-side safety scaling (Default)
+            info!("No parallelism specified. Querying DB for safe default (80% of DB CPUs)...");
+            match Self::get_db_cpu_count(&pool) {
+                Ok(db_cpus) => {
+                    let safe_threads = (db_cpus as f64 * 0.8).floor() as usize;
+                    let safe_threads = std::cmp::max(1, safe_threads);
+                    info!(
+                        "DB Server has {} CPUs. Setting parallelism to {} (80% safe limit).",
+                        db_cpus, safe_threads
+                    );
+                    safe_threads
+                }
+                Err(e) => {
+                    // Fallback if we can't query DB metdata (unlikely if pool works, but good for resilience)
+                    let fallback = 2;
+                    warn!(
+                        "Failed to query DB CPU count ({:?}). Defaulting to safe fallback: {} threads.",
+                        e, fallback
+                    );
+                    fallback
+                }
+            }
+        };
+
+        // Always run at least 1 thread.
+        let num_threads = std::cmp::max(1, num_threads);
+
+        // --- STEP 3: GLOBALS INITIALIZATION ---
+
+        // Rayon's global thread pool is used by `.into_par_iter()` throughout the app.
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build_global()
+            .unwrap_or_else(|e| {
+                info!(
+                    "Global thread pool already initialized (likely in a test): {}",
+                    e
+                );
+            });
+
+        Ok(Self { pool, num_threads })
+    }
+
+    /// Helper to fetch CPU count from Oracle
+    fn get_db_cpu_count(pool: &Pool<OracleConnectionManager>) -> Result<usize> {
+        let conn = pool
+            .get()
+            .map_err(|e| ExportError::OracleError(format!("Failed to get connection: {}", e)))?;
+
+        let sql = "SELECT value FROM v$parameter WHERE name = 'cpu_count'";
+        let row = conn
+            .query_row(sql, &[])
+            .map_err(|e| ExportError::OracleError(format!("Failed to query cpu_count: {}", e)))?;
+
+        // v$parameter value is a VARCHAR2
+        let count_str: String = row.get(0).map_err(|e| {
+            ExportError::OracleError(format!("Failed to get cpu_count column: {}", e))
+        })?;
+
+        count_str
+            .parse::<usize>()
+            .map_err(|_| ExportError::MetadataError("Failed to parse cpu_count".to_string()))
     }
 }

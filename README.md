@@ -45,7 +45,7 @@ The application moves bottlenecks away from the client.
     ```bash
     cargo build --release
     ```
-    > **Note for Legacy Servers**: If running on older Linux versions (Oracle Linux 7/8), see [**BUILD.md**](BUILD.md) for compatibility instructions.
+    > **Note for Legacy Servers**: If running on older Linux versions (Oracle Linux 7/8), see [**DEVELOPMENT.md**](DEVELOPMENT.md) for portable build instructions.
 
 ## 🔄 Restartability & Resilience
 *   **Table-Level Atomicity**: The exporter treats the **Table** as the unit of work.
@@ -58,7 +58,7 @@ The application moves bottlenecks away from the client.
 2.  **Run with Native Client**:
     Ensure `LD_LIBRARY_PATH` points to your Oracle Instant Client.
     ```bash
-    ./target/release/oracle_rust_exporter --username HR --password hr --host db-server --service ORCLPDB --table HR.EMPLOYEES --output ./output
+    ./target/release/oracle_rust_exporter --username ${DB_USER} --password ${DB_PASS} --host db-server --service ORCLPDB --table HR.EMPLOYEES --output ./output
     ```
 
 3.  **Using a Config File (Recommended)**:
@@ -66,7 +66,7 @@ The application moves bottlenecks away from the client.
     ```yaml
     database:
       username: "SYSTEM"
-      password: "password"
+      password: "${DB_PASS}"
       host: "localhost"
       port: 1521
       service: "FREEPDB1"
@@ -124,12 +124,12 @@ The exporter performs high-fidelity type conversion to ensure Oracle data is rep
 ### 🕒 Interval Transformation Details
 Oracle `INTERVAL` types are converted to strings using robust SQL logic to ensure BigQuery compatibility:
 
-- **Year-Month**: `(YEAR)-(MONTH) 0 0:0:0`
-  - Example: `1-2` -> `1-2 0 0:0:0`
-  - Logic: `CASE WHEN ... THEN '-' ELSE '' END || ABS(YEAR) || '-' || ABS(MONTH) || ' 0 0:0:0'`
-- **Day-Second**: `0-0 (DAY) (HOUR):(MIN):(SEC)`
-  - Example: `3 12:30:45` -> `0-0 3 12:30:45`
-  - Logic: `'0-0 ' || CASE WHEN ... THEN '-' ELSE '' END || ABS(DAY) || ' ' || ABS(HOUR) || ':' || ABS(MIN) || ':' || ABS(SEC)`
+-   **Year-Month**: `(YEAR)-(MONTH) 0 0:0:0`
+    -   Example: `1-2` -> `1-2 0 0:0:0`
+    -   Logic: `CASE WHEN ... THEN '-' ELSE '' END || ABS(YEAR) || '-' || ABS(MONTH) || ' 0 0:0:0'`
+-   **Day-Second**: `0-0 (DAY) (HOUR):(MIN):(SEC)`
+    -   Example: `3 12:30:45` -> `0-0 3 12:30:45`
+    -   Logic: `'0-0 ' || CASE WHEN ... THEN '-' ELSE '' END || ABS(DAY) || ' ' || ABS(HOUR) || ':' || ABS(MIN) || ':' || ABS(SEC)`
 
 ---
 
@@ -167,7 +167,15 @@ bash tests/scripts/run_all.sh
 
 ## ❓ Troubleshooting
 
-For issues with connections, type mismatches, or crashes, see the **[Troubleshooting Guide](TROUBLESHOOTING.md)**.
+*   **`libclntsh.so` not found**: Ensure `LD_LIBRARY_PATH` includes your Instant Client directory.
+    ```bash
+    export LD_LIBRARY_PATH=$(pwd)/lib/instantclient_19_10:$LD_LIBRARY_PATH
+    ```
+*   **"Connection Refused"**: Check if your database (or Docker container) is running on port 1521.
+*   **BigQuery Partial Load**: Check `report.json` for per-table errors.
+*   **Logs**: Set `RUST_LOG=info` (or `debug` for SQL) to see details.
+
+For detailed debugging, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ---
 

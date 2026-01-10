@@ -95,22 +95,38 @@ pub fn build_hash_from_parts(hash_parts: &[String]) -> String {
 ///
 /// Handles types that require transformation before export (e.g., TIMESTAMP TZ to UTC string,
 /// XMLType to string, SDO_GEOMETRY to WKT, INTERVALs to ISO-like strings).
-pub fn build_column_expression(name: &str, data_type: &str) -> String {
+pub fn build_column_expression(
+    name: &str,
+    data_type: &str,
+    format: &crate::domain::entities::FileFormat,
+) -> String {
     let upper_type = data_type.to_uppercase();
     let q_name = quote_ident(name);
 
     if upper_type.contains("TIME ZONE") {
         format!("SYS_EXTRACT_UTC({})", q_name)
     } else if upper_type == "XMLTYPE" {
-        format!(
-            "REPLACE(REPLACE(sys.XMLType.getClobVal({}), CHR(10), ''), CHR(13), '')",
-            q_name
-        )
+        // XML Newline Optimization:
+        // - CSV: Must replace newlines because CSV treats them as row delimiters (unless quoted, but Oracle CSV format can be tricky).
+        //        Actually, keeping strict behavior for CSV.
+        // - Parquet: PROVEN to handle newlines correctly in Utf8 strings. Preserve them for fidelity.
+        match format {
+            crate::domain::entities::FileFormat::Parquet => {
+                format!("sys.XMLType.getClobVal({})", q_name)
+            }
+            _ => format!(
+                "REPLACE(REPLACE(sys.XMLType.getClobVal({}), CHR(10), ''), CHR(13), '')",
+                q_name
+            ),
+        }
     } else if upper_type == "JSON" {
-        format!(
-            "REPLACE(REPLACE(JSON_SERIALIZE({}), CHR(10), ''), CHR(13), '')",
-            q_name
-        )
+        match format {
+            crate::domain::entities::FileFormat::Parquet => format!("JSON_SERIALIZE({})", q_name),
+            _ => format!(
+                "REPLACE(REPLACE(JSON_SERIALIZE({}), CHR(10), ''), CHR(13), '')",
+                q_name
+            ),
+        }
     } else if upper_type.contains("SDO_GEOMETRY") {
         format!("SDO_UTIL.TO_WKTGEOMETRY({})", q_name)
     } else if upper_type.contains("UROWID") || upper_type.contains("ROWID") {
@@ -156,6 +172,7 @@ pub fn build_export_query(
     table: &str,
     columns: &[crate::domain::entities::ColumnMetadata],
     enable_row_hash: bool,
+    format: &crate::domain::entities::FileFormat,
     where_clause: Option<&str>,
 ) -> String {
     let mut select_list: Vec<String> = columns
@@ -164,7 +181,7 @@ pub fn build_export_query(
         .map(|c| {
             format!(
                 "{} AS {}",
-                build_column_expression(&c.name, &c.raw_type),
+                build_column_expression(&c.name, &c.raw_type, format),
                 quote_ident(&c.name)
             )
         })

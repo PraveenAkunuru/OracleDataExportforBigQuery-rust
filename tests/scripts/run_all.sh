@@ -58,7 +58,7 @@ echo -e "\n[4/4] Running Docker Integration Test..."
 DOCKER_STATUS=$(docker inspect -f '{{.State.Health.Status}}' oracle23-free 2>/dev/null || echo "not found")
 
 if [ "$DOCKER_STATUS" == "healthy" ]; then
-    bash tests/scripts/run_docker_test.sh || { echo "Docker Integration Test FAILED"; exit 1; }
+    bash tests/scripts/run_integration_tests.sh full || { echo "Docker Integration Test FAILED"; exit 1; }
 else
     echo "Skipping Docker Integration Test (Container oracle23-free not healthy or not found)."
     echo "Current Status: $DOCKER_STATUS"

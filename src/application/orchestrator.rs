@@ -32,12 +32,11 @@ use crate::domain::errors::Result;
 use crate::ports::artifact_port::ArtifactPort;
 use crate::ports::extraction_port::ExtractionPort;
 use crate::ports::metadata_port::MetadataPort;
-use log::debug;
-use log::info;
 use rayon::prelude::*;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::{debug, info, instrument};
 
 /// `Orchestrator` coordinates the end-to-end export process.
 pub struct Orchestrator {
@@ -72,6 +71,7 @@ impl Orchestrator {
     /// It performs target discovery (finding which tables to export),
     /// plans the tasks (fetching metadata, creating directories),
     /// and then executes the tasks in a flat parallel stream.
+    #[instrument(skip(self))]
     pub fn run(&self) -> Result<Vec<TaskResult>> {
         let start_time = Instant::now();
         info!("Starting Export Orchestrator...");
@@ -422,6 +422,7 @@ impl Orchestrator {
     }
 
     /// Executes a single export task.
+    #[instrument(skip(self), fields(schema = %task.schema, table = %task.table, chunk = ?task.chunk_id))]
     fn execute_task(&self, task: ExportTask, metadata: &TableMetadata) -> TaskResult {
         // --- RESUME CAPABILITY ---
         // We now rely on Table-Level checking (metadata.json).

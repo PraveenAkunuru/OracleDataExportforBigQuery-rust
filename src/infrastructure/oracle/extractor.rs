@@ -345,6 +345,7 @@ impl ExtractionPort for Extractor {
             &metadata.table_name,
             &metadata.columns,
             task.enable_row_hash,
+            &task.file_format,
             task.query_where.as_deref(),
         );
         debug!("Built SQL lengths: {}", sql.len());

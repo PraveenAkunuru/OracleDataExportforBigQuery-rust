@@ -176,8 +176,19 @@ The application implements a **Table-Level** restart strategy to ensure data con
 
 3.  **Safety**:
     *   Atomic commit via file existence.
-    *   No complex state tracking or offset management.
     *   Guarantees that a table in the target bucket is always complete.
+
+---
+
+## 🛡️ Security Architecture
+
+### Credential Management
+*   **Environment Variables**: The preferred method. `config.yaml` supports `${VAR}` substitution.
+*   **Logging Scrubbing**: The `OracleConnectionManager` implements `Debug` traits that actively scrub password fields from logs.
+*   **Memory Safety**: Rust's ownership model ensures no use-after-free vulnerabilities.
+
+### Network
+*   **TCPS**: The application supports full Oracle Connection Strings, enabling `TCPS` (SSL/TLS) for transit encryption.
 
 ---
 

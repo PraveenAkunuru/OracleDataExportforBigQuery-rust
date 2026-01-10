@@ -411,17 +411,20 @@ impl AppConfig {
     }
 
     /// Replaces ${VAR} or $VAR in the input string with environment variable values.
+    ///
+    /// # Security
+    /// This is the primary mechanism for injecting secrets into the configuration
+    /// without hardcoding them in the file.
     fn substitute_env_vars(input: &str) -> String {
         let regex = regex::Regex::new(r"\$\{?([a-zA-Z_][a-zA-Z0-9_]*)\}?").unwrap();
         regex
             .replace_all(input, |caps: &regex::Captures| {
                 let var_name = &caps[1];
                 std::env::var(var_name).unwrap_or_else(|_| {
-                    // If var is missing, keep original string to avoid breaking non-env usage
-                    // or consider warning. For now, strict: return original.
-                    // Actually, for secrets, we might want empty string, but keeping original
-                    // allows default values if not meant to be env var.
-                    // Let's create a special case: valid env var -> replace, else -> keep.
+                    // Start of Security/Usability Trade-off
+                    // We return the original string if the env var is missing.
+                    // This allows users to have "${" in their passwords if strictly necessary,
+                    // assuming it doesn't match a valid env var name.
                     caps[0].to_string()
                 })
             })
